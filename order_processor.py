@@ -46,6 +46,8 @@ class OrderProcessor(QObject):
     tracking_completed = Signal(str)  # tracking_no
     ui_update_required = Signal()
     log_message = Signal(str)  # 로그 메시지
+    scanner_pause = Signal()  # 스캐너 일시 중지
+    scanner_resume = Signal()  # 스캐너 재개
     
     def __init__(
         self,
@@ -196,6 +198,9 @@ class OrderProcessor(QObject):
         # 처리 시작
         self._is_processing = True
         
+        # 스캐너 일시 중지 (EzAuto 입력 중 키 입력 방지)
+        self.scanner_pause.emit()
+        
         if is_new_tracking:
             # 새 송장: 송장번호 + 바코드 입력
             self._current_tracking_no = tracking_no
@@ -212,6 +217,13 @@ class OrderProcessor(QObject):
             # 같은 송장: 바코드만 입력
             self.ezauto.send_barcode_only(barcode)
             self.log_message.emit(f"[EzAuto] 바코드만 입력: {barcode}")
+        
+        # 스캐너 재개 전 대기 (입력 완료 후 안정화)
+        import time as time_mod
+        time_mod.sleep(0.5)
+        
+        # 스캐너 재개
+        self.scanner_resume.emit()
         
         # 7. 남은 수량 계산
         remaining = self.excel.get_group_remaining(tracking_no)
@@ -231,9 +243,18 @@ class OrderProcessor(QObject):
             self.excel.mark_used(tracking_no)
             self.log_message.emit(f"[완료] 송장 {tracking_no} 처리 완료 (used=1)")
             
+            # 스캐너 일시 중지 (다음 송장 자동 시작 방지)
+            self.scanner_pause.emit()
+            
             # 완료 시그널
             self.tracking_completed.emit(tracking_no)
             self._current_tracking_no = None
+            
+            # 1초 대기 후 스캐너 재개
+            import time as time_mod
+            time_mod.sleep(1.0)
+            self.scanner_resume.emit()
+            self.log_message.emit("[정보] 다음 송장 스캔 준비 완료")
             
             event = ScanEvent(
                 timestamp=timestamp,

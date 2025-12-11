@@ -27,6 +27,8 @@ class ExcelLoader(QObject):
         '상품명': 'product_name',
         '옵션명': 'option_name',
         '상품수량': 'qty',
+        '로케이션': 'location',
+        '위치': 'location',
     }
     
     # 대체 컬럼명 (상품수량이 없을 때만 사용)

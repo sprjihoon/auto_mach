@@ -31,6 +31,7 @@ class ScannerListener(QObject):
         self._is_fast_input: bool = False  # 빠른 입력 모드 (스캐너)
         self._last_emitted_barcode: str = ""
         self._last_emit_time: float = 0
+        self._is_paused: bool = False  # 일시 중지 플래그
     
     def start(self) -> bool:
         """스캐너 리스닝 시작"""
@@ -68,7 +69,7 @@ class ScannerListener(QObject):
     
     def _on_key_press(self, event: keyboard.KeyboardEvent):
         """키 입력 이벤트 핸들러 (스캐너 입력 속도 필터링)"""
-        if not self._is_running:
+        if not self._is_running or self._is_paused:
             return
         
         import time
@@ -136,6 +137,20 @@ class ScannerListener(QObject):
         """버퍼 초기화"""
         with self._lock:
             self._buffer = ""
+    
+    def pause(self):
+        """스캐너 일시 중지 (EzAuto 입력 중)"""
+        self._is_paused = True
+        self.clear_buffer()
+    
+    def resume(self):
+        """스캐너 재개 (버퍼 및 중복 방지 상태 초기화)"""
+        with self._lock:
+            self._buffer = ""
+            self._last_emitted_barcode = ""
+            self._last_emit_time = 0
+            self._last_key_time = 0
+        self._is_paused = False
     
     @property
     def is_running(self) -> bool:

@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QHeaderView, QMessageBox, QFrame, QCheckBox, QDialog,
     QScrollArea, QGridLayout
 )
-from PySide6.QtCore import Qt, Slot, QTimer
+from PySide6.QtCore import Qt, Slot, QTimer, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QFont, QColor, QPalette, QIcon
 import pandas as pd
 
@@ -403,6 +403,11 @@ class MainWindow(QMainWindow):
         
         right_layout.addWidget(self.summary_tabs)
         
+        # PDF 저장 버튼
+        pdf_save_btn = QPushButton("📄 제품별 PDF 저장")
+        pdf_save_btn.clicked.connect(self._on_save_product_pdf)
+        right_layout.addWidget(pdf_save_btn)
+        
         layout.addWidget(right_group, 1)  # 5:5 비율
         
         return widget
@@ -566,6 +571,8 @@ class MainWindow(QMainWindow):
         self.processor.tracking_completed.connect(self._on_tracking_completed)
         self.processor.ui_update_required.connect(self._update_tables)
         self.processor.log_message.connect(self._add_log)
+        self.processor.scanner_pause.connect(self.scanner.pause)
+        self.processor.scanner_resume.connect(self.scanner.resume)
     
     # === 이벤트 핸들러 ===
     
@@ -662,6 +669,178 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "오류", "엑셀 파일 저장에 실패했습니다.")
     
     @Slot()
+    def _on_save_product_pdf(self):
+        """제품별 요약을 PDF로 저장"""
+        if self.excel_loader.df is None:
+            QMessageBox.warning(self, "경고", "먼저 엑셀 파일을 불러오세요.")
+            return
+        
+        # 파일 저장 경로 선택
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "제품별 요약 PDF 저장",
+            "제품별_피킹리스트.pdf",
+            "PDF Files (*.pdf);;All Files (*)"
+        )
+        
+        if not file_path:
+            return
+        
+        if not file_path.lower().endswith('.pdf'):
+            file_path += '.pdf'
+        
+        try:
+            from reportlab.lib import colors
+            from reportlab.lib.pagesizes import A4
+            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+            from reportlab.lib.units import mm
+            from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+            from reportlab.pdfbase import pdfmetrics
+            from reportlab.pdfbase.ttfonts import TTFont
+            
+            # 한글 폰트 등록 (맑은 고딕)
+            try:
+                pdfmetrics.registerFont(TTFont('MalgunGothic', 'C:/Windows/Fonts/malgun.ttf'))
+                font_name = 'MalgunGothic'
+            except:
+                font_name = 'Helvetica'
+            
+            # 데이터 준비
+            df = self.excel_loader.df
+            pending = df[df['used'] == 0]
+            
+            if pending.empty:
+                QMessageBox.information(self, "알림", "처리할 제품이 없습니다.")
+                return
+            
+            # 로케이션 컬럼 확인
+            has_location = 'location' in pending.columns
+            
+            # 제품별 집계
+            product_data = []
+            grouped = pending.groupby(['product_name', 'option_name', 'barcode'])
+            
+            for (product_name, option_name, barcode), group in grouped:
+                total_qty = int(group['qty'].sum())
+                scanned_qty = int(group['scanned_qty'].sum())
+                remaining = total_qty - scanned_qty
+                
+                if remaining > 0:
+                    location = ''
+                    if has_location:
+                        loc_values = group['location'].dropna().unique()
+                        if len(loc_values) > 0:
+                            location = str(loc_values[0])
+                    
+                    product_data.append({
+                        'product_name': str(product_name) if pd.notna(product_name) else '',
+                        'option_name': str(option_name) if pd.notna(option_name) else '',
+                        'remaining': remaining,
+                        'location': location,
+                        'barcode': str(barcode) if pd.notna(barcode) else ''
+                    })
+            
+            # 수량 내림차순 정렬
+            product_data.sort(key=lambda x: -x['remaining'])
+            
+            # PDF 생성
+            doc = SimpleDocTemplate(file_path, pagesize=A4, 
+                                   leftMargin=15*mm, rightMargin=15*mm,
+                                   topMargin=15*mm, bottomMargin=15*mm)
+            
+            elements = []
+            
+            # 스타일
+            styles = getSampleStyleSheet()
+            title_style = ParagraphStyle(
+                'Title',
+                parent=styles['Heading1'],
+                fontName=font_name,
+                fontSize=18,
+                alignment=1  # 중앙 정렬
+            )
+            
+            # 제목
+            from datetime import datetime
+            title = Paragraph(f"제품별 피킹 리스트 ({datetime.now().strftime('%Y-%m-%d %H:%M')})", title_style)
+            elements.append(title)
+            elements.append(Spacer(1, 10*mm))
+            
+            # 테이블 헤더
+            if has_location:
+                headers = ['No', '수량', '로케이션', '제품명', '옵션명', '바코드']
+                col_widths = [10*mm, 15*mm, 25*mm, 55*mm, 40*mm, 35*mm]
+            else:
+                headers = ['No', '수량', '제품명', '옵션명', '바코드']
+                col_widths = [10*mm, 15*mm, 70*mm, 50*mm, 35*mm]
+            
+            # 테이블 데이터
+            table_data = [headers]
+            for i, item in enumerate(product_data, 1):
+                if has_location:
+                    row = [
+                        str(i),
+                        str(item['remaining']),
+                        item['location'],
+                        item['product_name'][:30],
+                        item['option_name'][:20] if item['option_name'] != 'nan' else '',
+                        item['barcode']
+                    ]
+                else:
+                    row = [
+                        str(i),
+                        str(item['remaining']),
+                        item['product_name'][:40],
+                        item['option_name'][:25] if item['option_name'] != 'nan' else '',
+                        item['barcode']
+                    ]
+                table_data.append(row)
+            
+            # 테이블 생성
+            table = Table(table_data, colWidths=col_widths, repeatRows=1)
+            table.setStyle(TableStyle([
+                ('FONTNAME', (0, 0), (-1, -1), font_name),
+                ('FONTSIZE', (0, 0), (-1, 0), 10),
+                ('FONTSIZE', (0, 1), (-1, -1), 9),
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2196F3')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
+                ('ALIGN', (0, 1), (1, -1), 'CENTER'),  # No, 수량 중앙
+                ('ALIGN', (2, 1), (-1, -1), 'LEFT'),
+                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#F5F5F5')]),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                ('TOPPADDING', (0, 0), (-1, -1), 4),
+            ]))
+            
+            elements.append(table)
+            
+            # 합계
+            total_remaining = sum(item['remaining'] for item in product_data)
+            summary_style = ParagraphStyle(
+                'Summary',
+                parent=styles['Normal'],
+                fontName=font_name,
+                fontSize=12,
+                alignment=2  # 오른쪽 정렬
+            )
+            elements.append(Spacer(1, 5*mm))
+            elements.append(Paragraph(f"총 {len(product_data)}개 품목 / {total_remaining}개 수량", summary_style))
+            
+            # PDF 저장
+            doc.build(elements)
+            
+            self._add_log(f"제품별 PDF 저장 완료: {file_path}")
+            QMessageBox.information(self, "성공", f"PDF가 저장되었습니다.\n{file_path}")
+            
+        except ImportError:
+            QMessageBox.warning(self, "오류", "reportlab 패키지가 필요합니다.\npip install reportlab")
+        except Exception as e:
+            self._add_log(f"[오류] PDF 저장 실패: {str(e)}")
+            QMessageBox.warning(self, "오류", f"PDF 저장 실패: {str(e)}")
+    
+    @Slot()
     def _on_browse_save_path(self):
         """저장 경로 선택"""
         file_path, _ = QFileDialog.getSaveFileName(
@@ -738,6 +917,8 @@ class MainWindow(QMainWindow):
         # 결과에 따른 색상
         if event.result == ScanResult.SUCCESS:
             color = "#4CAF50"  # 녹색
+            # 스캔 성공 시 카드 반짝임 효과
+            QTimer.singleShot(100, lambda: self._highlight_scanned_cards(event.barcode))
         elif event.result == ScanResult.ALREADY_USED:
             color = "#FF9800"  # 주황색
         else:
@@ -864,6 +1045,7 @@ class MainWindow(QMainWindow):
         for _, row in pending.iterrows():
             product_name = str(row['product_name']) if pd.notna(row['product_name']) else ''
             option_name = str(row['option_name']) if pd.notna(row['option_name']) else ''
+            barcode = str(row['barcode']) if pd.notna(row['barcode']) else ''
             qty = int(row['qty']) if pd.notna(row['qty']) else 1
             scanned = int(row['scanned_qty']) if pd.notna(row['scanned_qty']) else 0
             remaining = qty - scanned
@@ -873,6 +1055,7 @@ class MainWindow(QMainWindow):
                 product_summary[key] = {
                     'product_name': product_name,
                     'option_name': option_name,
+                    'barcode': barcode,
                     'total_qty': 0,
                     'remaining': 0
                 }
@@ -886,6 +1069,9 @@ class MainWindow(QMainWindow):
         """제품별 카드 생성"""
         card = QFrame()
         card.setFrameShape(QFrame.StyledPanel)
+        
+        # 바코드 정보 저장 (반짝임 효과용)
+        card._barcode = prod_info.get('barcode', '')
         
         remaining = prod_info['remaining']
         if remaining >= 20:
@@ -915,10 +1101,10 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(5, 3, 5, 3)
         layout.setSpacing(8)
         
-        # 남은 수량
-        count_label = QLabel(f"<b style='color:{text_color};'>{remaining}</b>")
-        count_label.setFixedWidth(35)
-        count_label.setAlignment(Qt.AlignCenter)
+        # 남은 수량 (4자리까지 표시)
+        count_label = QLabel(f"<b style='color:{text_color}; font-size:14px;'>{remaining}</b>")
+        count_label.setFixedWidth(50)
+        count_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         layout.addWidget(count_label)
         
         # 제품명 + 옵션
@@ -971,6 +1157,9 @@ class MainWindow(QMainWindow):
         card = QFrame()
         card.setFrameShape(QFrame.StyledPanel)
         
+        # 바코드 정보 저장 (반짝임 효과용)
+        card._barcodes = combo_info.get('barcodes', [])
+        
         count = combo_info['count']
         if count >= 10:
             bg_color = "#FFEBEE"
@@ -1019,6 +1208,46 @@ class MainWindow(QMainWindow):
         layout.addWidget(prod_label, 1)
         
         return card
+    
+    def _flash_card(self, card: QFrame, flash_color: str = "#FFEB3B"):
+        """카드 반짝임 효과"""
+        if not card:
+            return
+        
+        # 원래 스타일 저장
+        original_style = card.styleSheet()
+        
+        # 반짝임 색상으로 변경
+        card.setStyleSheet(f"""
+            QFrame {{
+                background-color: {flash_color};
+                border: 3px solid #FFC107;
+                border-radius: 8px;
+                padding: 6px 10px;
+                margin: 2px;
+            }}
+        """)
+        
+        # 0.3초 후 원래 스타일로 복원
+        QTimer.singleShot(300, lambda: card.setStyleSheet(original_style))
+    
+    def _highlight_scanned_cards(self, barcode: str):
+        """스캔된 바코드에 해당하는 카드들 반짝임"""
+        # 구성별 카드에서 찾기
+        for i in range(self.summary_grid.count()):
+            item = self.summary_grid.itemAt(i)
+            if item and item.widget():
+                card = item.widget()
+                if hasattr(card, '_barcodes') and barcode in card._barcodes:
+                    self._flash_card(card)
+        
+        # 제품별 카드에서 찾기
+        for i in range(self.product_grid.count()):
+            item = self.product_grid.itemAt(i)
+            if item and item.widget():
+                card = item.widget()
+                if hasattr(card, '_barcode') and card._barcode == barcode:
+                    self._flash_card(card, "#4CAF50")  # 녹색 반짝임
     
     def _update_status_count(self):
         """상태바 카운트 업데이트"""
