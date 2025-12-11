@@ -3,7 +3,7 @@
 """
 import pandas as pd
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 from PySide6.QtCore import QObject, Signal
 
 from utils import get_base_path, get_timestamp
@@ -179,46 +179,42 @@ class ExcelLoader(QObject):
             self.error_occurred.emit(f"엑셀 로드 오류: {str(e)}")
             return False
     
-    def save_excel(self, save_path: str = None) -> bool:
-        """현재 DataFrame을 엑셀로 저장 (xlsx로 저장, xls는 xlsx로 변환)
+    def save_excel(self, save_path: str = None) -> Tuple[bool, str]:
+        """현재 DataFrame을 엑셀로 저장 (xlsx로 저장, 파일명 뒤에 _역매칭 추가)
         
         Args:
-            save_path: 저장할 파일 경로. None이면 원본 파일 위치에 저장
+            save_path: 저장할 파일 경로. None이면 원본 파일 기반으로 _역매칭 추가
+            
+        Returns:
+            (성공 여부, 저장된 파일 경로)
         """
         if self.df is None:
-            return False
+            return False, ""
         
         try:
             if save_path:
                 # 지정된 경로로 저장
                 target_path = Path(save_path)
             elif self.file_path:
-                # 원본 파일 위치에 저장
-                # 백업 파일 생성
-                backup_suffix = f'.backup{self.file_path.suffix}'
-                backup_path = self.file_path.with_suffix(backup_suffix)
-                if self.file_path.exists():
-                    import shutil
-                    shutil.copy(self.file_path, backup_path)
+                # 원본 파일명에 _역매칭 추가
+                stem = self.file_path.stem  # 확장자 제외 파일명
                 
-                # xls 파일은 xlsx로 저장 (pandas 2.x는 xlwt 미지원)
-                ext = self.file_path.suffix.lower()
-                if ext == '.xls':
-                    target_path = self.file_path.with_suffix('.xlsx')
-                    self.error_occurred.emit(f"xls 파일을 xlsx로 저장합니다: {target_path.name}")
-                else:
-                    target_path = self.file_path
+                # 이미 _역매칭이 있으면 추가하지 않음
+                if not stem.endswith('_역매칭'):
+                    stem = f"{stem}_역매칭"
+                
+                target_path = self.file_path.parent / f"{stem}.xlsx"
             else:
                 self.error_occurred.emit("저장할 파일 경로가 없습니다")
-                return False
+                return False, ""
             
             # 저장 (항상 openpyxl 사용)
             self.df.to_excel(target_path, index=False, engine='openpyxl')
-            return True
+            return True, str(target_path)
             
         except Exception as e:
             self.error_occurred.emit(f"엑셀 저장 오류: {str(e)}")
-            return False
+            return False, ""
     
     def find_by_barcode(self, barcode: str) -> pd.DataFrame:
         """바코드로 행 검색 (used=0인 것만)"""

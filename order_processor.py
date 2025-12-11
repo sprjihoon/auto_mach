@@ -5,12 +5,37 @@ qty/scanned_qty 처리, 우선순위 정렬 로직
 from typing import Optional, Tuple
 from PySide6.QtCore import QObject, Signal
 import pandas as pd
+import winsound
+import threading
 
 from models import ScanResult, ScanEvent
 from excel_loader import ExcelLoader
 from ezauto_input import EzAutoInput
 from pdf_printer import PDFPrinter
 from utils import get_timestamp, sanitize_barcode
+
+
+def play_scan_sound():
+    """스캔 성공 신호음 (짧은 비프)"""
+    def _play():
+        winsound.Beep(1000, 100)  # 1000Hz, 100ms
+    threading.Thread(target=_play, daemon=True).start()
+
+
+def play_complete_sound():
+    """송장 완료 신호음 (멜로디)"""
+    def _play():
+        winsound.Beep(800, 150)   # 낮은 음
+        winsound.Beep(1000, 150)  # 중간 음
+        winsound.Beep(1200, 200)  # 높은 음
+    threading.Thread(target=_play, daemon=True).start()
+
+
+def play_error_sound():
+    """오류 신호음"""
+    def _play():
+        winsound.Beep(300, 300)  # 낮은 음, 긴 소리
+    threading.Thread(target=_play, daemon=True).start()
 
 
 class OrderProcessor(QObject):
@@ -62,8 +87,8 @@ class OrderProcessor(QObject):
         timestamp = get_timestamp()
         current_time = time_module.time()
         
-        # 같은 바코드 0.3초 내 재스캔 방지 (스캐너 더블 스캔 방지용)
-        if barcode == self._last_barcode and (current_time - self._last_scan_time) < 0.3:
+        # 같은 바코드 0.5초 내 재스캔 방지 (스캐너 더블 스캔 방지용)
+        if barcode == self._last_barcode and (current_time - self._last_scan_time) < 0.5:
             self.log_message.emit(f"[무시] 더블 스캔 방지: {barcode}")
             return None
         
@@ -97,13 +122,15 @@ class OrderProcessor(QObject):
                 candidates = current_match.reset_index(drop=False)
                 self.log_message.emit(f"[디버그] 현재 송장 {self._current_tracking_no}에서 처리")
             else:
-                # 현재 송장에 해당 바코드 없음 → 무시
+                # 현재 송장에 해당 바코드 없음 → 경고음 + 무시
+                play_error_sound()  # 경고음 🚨
+                
                 event = ScanEvent(
                     timestamp=timestamp,
                     barcode=barcode,
                     tracking_no=self._current_tracking_no,
                     result=ScanResult.NOT_FOUND,
-                    message=f"현재 송장({self._current_tracking_no})에 '{barcode}' 없음. 송장 완료 후 스캔하세요."
+                    message=f"⚠️ 현재 송장({self._current_tracking_no})에 '{barcode}' 없음!"
                 )
                 self.scan_processed.emit(event)
                 self.log_message.emit(f"[경고] {event.message}")
@@ -118,13 +145,15 @@ class OrderProcessor(QObject):
                 candidates = None
         
         if candidates is None or candidates.empty:
-            # 바코드 없음
+            # 바코드 없음 → 경고음
+            play_error_sound()  # 경고음 🚨
+            
             event = ScanEvent(
                 timestamp=timestamp,
                 barcode=barcode,
                 tracking_no=None,
                 result=ScanResult.NOT_FOUND,
-                message=f"바코드 '{barcode}'를 찾을 수 없습니다"
+                message=f"⚠️ 바코드 '{barcode}'를 찾을 수 없습니다"
             )
             self.scan_processed.emit(event)
             self.log_message.emit(f"[경고] {event.message}")
@@ -195,6 +224,9 @@ class OrderProcessor(QObject):
             # 송장 완료! (PDF는 이미 첫 스캔 시 출력됨)
             self.log_message.emit(f"[완료] 송장 {tracking_no} 구성 완료!")
             
+            # 완료 신호음 🎵
+            play_complete_sound()
+            
             # used = 1 설정
             self.excel.mark_used(tracking_no)
             self.log_message.emit(f"[완료] 송장 {tracking_no} 처리 완료 (used=1)")
@@ -211,6 +243,9 @@ class OrderProcessor(QObject):
                 message=f"송장 {tracking_no} 구성 완료!"
             )
         else:
+            # 스캔 성공 신호음 🔔
+            play_scan_sound()
+            
             event = ScanEvent(
                 timestamp=timestamp,
                 barcode=barcode,

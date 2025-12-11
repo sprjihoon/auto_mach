@@ -427,15 +427,21 @@ class MainWindow(QMainWindow):
         
         btn_layout.addStretch()
         
+        # 저장 경로 설정
+        btn_layout.addWidget(QLabel("저장 위치:"))
+        self.save_path_edit = QLineEdit()
+        self.save_path_edit.setPlaceholderText("저장 위치 선택")
+        self.save_path_edit.setMaximumWidth(200)
+        btn_layout.addWidget(self.save_path_edit)
+        
+        self.save_browse_btn = QPushButton("위치 선택")
+        self.save_browse_btn.clicked.connect(self._on_browse_save_path)
+        btn_layout.addWidget(self.save_browse_btn)
+        
         # 저장 버튼
         save_btn = QPushButton("엑셀 저장")
         save_btn.clicked.connect(self._on_save_excel)
         btn_layout.addWidget(save_btn)
-        
-        # 다른 이름으로 저장 버튼
-        save_as_btn = QPushButton("다른 이름으로 저장")
-        save_as_btn.clicked.connect(self._on_save_excel_as)
-        btn_layout.addWidget(save_as_btn)
         
         layout.addLayout(btn_layout)
         
@@ -630,24 +636,37 @@ class MainWindow(QMainWindow):
     
     @Slot()
     def _on_save_excel(self):
-        """엑셀 파일 저장"""
-        if self.excel_loader.save_excel():
-            self._add_log("엑셀 파일 저장 완료")
-            QMessageBox.information(self, "성공", "엑셀 파일이 저장되었습니다.")
-        else:
-            QMessageBox.warning(self, "오류", "엑셀 파일 저장에 실패했습니다.")
-    
-    @Slot()
-    def _on_save_excel_as(self):
-        """엑셀 파일 다른 이름으로 저장"""
+        """엑셀 파일 저장 (파일명_역매칭.xlsx로 저장)"""
         if self.excel_loader.df is None:
             QMessageBox.warning(self, "경고", "먼저 엑셀 파일을 불러오세요.")
             return
         
-        # 파일 저장 대화상자
+        # 저장 경로 확인
+        save_path = self.save_path_edit.text().strip()
+        
+        if save_path:
+            # 지정된 경로로 저장
+            success, saved_path = self.excel_loader.save_excel(save_path)
+            if success:
+                self._add_log(f"엑셀 파일 저장 완료: {saved_path}")
+                QMessageBox.information(self, "성공", f"엑셀 파일이 저장되었습니다.\n{saved_path}")
+            else:
+                QMessageBox.warning(self, "오류", "엑셀 파일 저장에 실패했습니다.")
+        else:
+            # 원본 위치에 _역매칭 붙여서 저장
+            success, saved_path = self.excel_loader.save_excel()
+            if success:
+                self._add_log(f"엑셀 파일 저장 완료: {saved_path}")
+                QMessageBox.information(self, "성공", f"엑셀 파일이 저장되었습니다.\n{saved_path}")
+            else:
+                QMessageBox.warning(self, "오류", "엑셀 파일 저장에 실패했습니다.")
+    
+    @Slot()
+    def _on_browse_save_path(self):
+        """저장 경로 선택"""
         file_path, _ = QFileDialog.getSaveFileName(
             self,
-            "엑셀 파일 저장",
+            "엑셀 저장 위치 선택",
             "",
             "Excel Files (*.xlsx);;All Files (*)"
         )
@@ -656,12 +675,8 @@ class MainWindow(QMainWindow):
             # .xlsx 확장자 보장
             if not file_path.lower().endswith('.xlsx'):
                 file_path += '.xlsx'
-            
-            if self.excel_loader.save_excel(file_path):
-                self._add_log(f"엑셀 파일 저장 완료: {file_path}")
-                QMessageBox.information(self, "성공", f"엑셀 파일이 저장되었습니다.\n{file_path}")
-            else:
-                QMessageBox.warning(self, "오류", "엑셀 파일 저장에 실패했습니다.")
+            self.save_path_edit.setText(file_path)
+            self._add_log(f"저장 위치 설정: {file_path}")
     
     @Slot()
     def _on_toggle_scanner(self):
@@ -703,6 +718,8 @@ class MainWindow(QMainWindow):
         """수동 바코드 스캔"""
         barcode = self.manual_barcode_edit.text().strip()
         if barcode:
+            # 스캐너 버퍼 클리어 (이중 처리 방지)
+            self.scanner.clear_buffer()
             self._on_barcode_scanned(barcode)
             self.manual_barcode_edit.clear()
     
@@ -1054,7 +1071,9 @@ class MainWindow(QMainWindow):
             )
             
             if reply == QMessageBox.Yes:
-                self.excel_loader.save_excel()
+                success, saved_path = self.excel_loader.save_excel()
+                if success:
+                    self._add_log(f"종료 시 저장 완료: {saved_path}")
                 event.accept()
             elif reply == QMessageBox.No:
                 event.accept()

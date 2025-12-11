@@ -29,6 +29,8 @@ class ScannerListener(QObject):
         self._lock = threading.Lock()
         self._last_key_time: float = 0
         self._is_fast_input: bool = False  # 빠른 입력 모드 (스캐너)
+        self._last_emitted_barcode: str = ""
+        self._last_emit_time: float = 0
     
     def start(self) -> bool:
         """스캐너 리스닝 시작"""
@@ -86,8 +88,17 @@ class ScannerListener(QObject):
                     self._buffer = ""
                     self._is_fast_input = False
                     
-                    # 최소 길이 확인 및 빠른 입력이었는지 확인
+                    # 최소 길이 확인
                     if barcode and len(barcode) >= self.MIN_BARCODE_LENGTH:
+                        # 같은 바코드 1초 내 중복 emit 방지
+                        import time
+                        now = time.time()
+                        if barcode == self._last_emitted_barcode and (now - self._last_emit_time) < 1.0:
+                            return  # 중복 무시
+                        
+                        self._last_emitted_barcode = barcode
+                        self._last_emit_time = now
+                        
                         # 시그널 발생 (메인 스레드에서 처리됨)
                         self.barcode_scanned.emit(barcode)
             
