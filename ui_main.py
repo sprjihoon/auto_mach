@@ -244,12 +244,13 @@ class MainWindow(QMainWindow):
         """상단 섹션: 파일 로드 및 설정"""
         group = QGroupBox("설정")
         layout = QHBoxLayout(group)
+        layout.setSpacing(5)  # 요소간 간격 줄임
         
         # 엑셀 파일 경로
         layout.addWidget(QLabel("엑셀:"))
         self.excel_path_edit = QLineEdit()
         self.excel_path_edit.setPlaceholderText("엑셀 파일 선택")
-        self.excel_path_edit.setMaximumWidth(150)
+        self.excel_path_edit.setMaximumWidth(180)
         layout.addWidget(self.excel_path_edit)
         
         # 찾아보기 버튼
@@ -267,13 +268,13 @@ class MainWindow(QMainWindow):
         self.summary_btn.clicked.connect(self._on_show_summary)
         layout.addWidget(self.summary_btn)
         
-        layout.addSpacing(20)
+        layout.addSpacing(15)
         
         # PDF 파일 경로
         layout.addWidget(QLabel("PDF:"))
         self.pdf_path_edit = QLineEdit()
         self.pdf_path_edit.setPlaceholderText("PDF 선택")
-        self.pdf_path_edit.setMaximumWidth(150)
+        self.pdf_path_edit.setMaximumWidth(180)
         layout.addWidget(self.pdf_path_edit)
         
         # PDF 파일 찾아보기 버튼
@@ -281,20 +282,20 @@ class MainWindow(QMainWindow):
         self.pdf_browse_btn.clicked.connect(self._on_browse_pdf_file)
         layout.addWidget(self.pdf_browse_btn)
         
-        layout.addSpacing(20)
+        layout.addSpacing(15)
         
         # 스캐너 시작/중지
         self.scanner_btn = QPushButton("스캐너 시작")
         self.scanner_btn.setCheckable(True)
         self.scanner_btn.clicked.connect(self._on_toggle_scanner)
-        self.scanner_btn.setMinimumWidth(120)
+        self.scanner_btn.setMinimumWidth(100)
         layout.addWidget(self.scanner_btn)
         
         # EzAuto 창 제목
         layout.addWidget(QLabel("창 제목:"))
         self.ezauto_title_edit = QLineEdit()
         self.ezauto_title_edit.setText("이지오토")
-        self.ezauto_title_edit.setMaximumWidth(100)
+        self.ezauto_title_edit.setMaximumWidth(80)
         self.ezauto_title_edit.textChanged.connect(self._on_ezauto_title_changed)
         layout.addWidget(self.ezauto_title_edit)
         
@@ -309,6 +310,9 @@ class MainWindow(QMainWindow):
         self.pdf_check.setChecked(True)
         self.pdf_check.toggled.connect(self._on_toggle_pdf)
         layout.addWidget(self.pdf_check)
+        
+        # 오른쪽 여백 (창 최대화 시 벌어짐 방지)
+        layout.addStretch()
         
         return group
     
