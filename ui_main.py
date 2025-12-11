@@ -403,11 +403,6 @@ class MainWindow(QMainWindow):
         
         right_layout.addWidget(self.summary_tabs)
         
-        # PDF 저장 버튼
-        pdf_save_btn = QPushButton("📄 제품별 PDF 저장")
-        pdf_save_btn.clicked.connect(self._on_save_product_pdf)
-        right_layout.addWidget(pdf_save_btn)
-        
         layout.addWidget(right_group, 1)  # 5:5 비율
         
         return widget
@@ -447,6 +442,20 @@ class MainWindow(QMainWindow):
         save_btn = QPushButton("엑셀 저장")
         save_btn.clicked.connect(self._on_save_excel)
         btn_layout.addWidget(save_btn)
+        
+        # 제품별 PDF 저장 버튼
+        pdf_save_btn = QPushButton("📄 피킹리스트 PDF")
+        pdf_save_btn.clicked.connect(self._on_save_product_pdf)
+        btn_layout.addWidget(pdf_save_btn)
+        
+        # 피킹리스트 열기 버튼
+        self.open_pdf_btn = QPushButton("📂 피킹리스트 열기")
+        self.open_pdf_btn.clicked.connect(self._on_open_picking_pdf)
+        self.open_pdf_btn.setEnabled(False)  # 초기에는 비활성화
+        btn_layout.addWidget(self.open_pdf_btn)
+        
+        # 마지막 저장된 PDF 경로
+        self._last_pdf_path = None
         
         layout.addLayout(btn_layout)
         
@@ -675,16 +684,27 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "경고", "먼저 엑셀 파일을 불러오세요.")
             return
         
-        # 파일 저장 경로 선택
-        file_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "제품별 요약 PDF 저장",
-            "제품별_피킹리스트.pdf",
-            "PDF Files (*.pdf);;All Files (*)"
-        )
+        from datetime import datetime
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         
-        if not file_path:
-            return
+        # 저장 경로가 지정되어 있으면 해당 폴더에 자동 저장
+        save_path = self.save_path_edit.text().strip()
+        if save_path:
+            # 지정된 경로의 폴더에 피킹리스트 PDF 저장
+            save_dir = Path(save_path).parent
+            file_path = str(save_dir / f"피킹리스트_{timestamp}.pdf")
+        else:
+            # 파일 저장 경로 선택 (기본 파일명에 타임스탬프 포함)
+            default_name = f"피킹리스트_{timestamp}.pdf"
+            file_path, _ = QFileDialog.getSaveFileName(
+                self,
+                "제품별 요약 PDF 저장",
+                default_name,
+                "PDF Files (*.pdf);;All Files (*)"
+            )
+            
+            if not file_path:
+                return
         
         if not file_path.lower().endswith('.pdf'):
             file_path += '.pdf'
@@ -716,29 +736,37 @@ class MainWindow(QMainWindow):
             # 로케이션 컬럼 확인
             has_location = 'location' in pending.columns
             
-            # 제품별 집계
+            # 제품별 집계 (UI와 동일하게 product_name + option_name으로 그룹화)
             product_data = []
-            grouped = pending.groupby(['product_name', 'option_name', 'barcode'])
+            product_summary = {}
             
-            for (product_name, option_name, barcode), group in grouped:
-                total_qty = int(group['qty'].sum())
-                scanned_qty = int(group['scanned_qty'].sum())
-                remaining = total_qty - scanned_qty
+            for _, row in pending.iterrows():
+                product_name = str(row['product_name']) if pd.notna(row['product_name']) else ''
+                option_name = str(row['option_name']) if pd.notna(row['option_name']) else ''
+                barcode = str(row['barcode']) if pd.notna(row['barcode']) else ''
+                qty = int(row['qty']) if pd.notna(row['qty']) else 1
+                scanned = int(row['scanned_qty']) if pd.notna(row['scanned_qty']) else 0
+                remaining = qty - scanned
                 
-                if remaining > 0:
-                    location = ''
-                    if has_location:
-                        loc_values = group['location'].dropna().unique()
-                        if len(loc_values) > 0:
-                            location = str(loc_values[0])
-                    
-                    product_data.append({
-                        'product_name': str(product_name) if pd.notna(product_name) else '',
-                        'option_name': str(option_name) if pd.notna(option_name) else '',
-                        'remaining': remaining,
+                location = ''
+                if has_location and 'location' in row and pd.notna(row['location']):
+                    location = str(row['location'])
+                
+                key = f"{product_name}|{option_name}"
+                if key not in product_summary:
+                    product_summary[key] = {
+                        'product_name': product_name,
+                        'option_name': option_name,
+                        'remaining': 0,
                         'location': location,
-                        'barcode': str(barcode) if pd.notna(barcode) else ''
-                    })
+                        'barcode': barcode
+                    }
+                product_summary[key]['remaining'] += remaining
+            
+            # 남은 수량이 있는 것만 추가
+            for item in product_summary.values():
+                if item['remaining'] > 0:
+                    product_data.append(item)
             
             # 수량 내림차순 정렬
             product_data.sort(key=lambda x: -x['remaining'])
@@ -832,6 +860,11 @@ class MainWindow(QMainWindow):
             doc.build(elements)
             
             self._add_log(f"제품별 PDF 저장 완료: {file_path}")
+            
+            # 마지막 PDF 경로 저장 및 열기 버튼 활성화
+            self._last_pdf_path = file_path
+            self.open_pdf_btn.setEnabled(True)
+            
             QMessageBox.information(self, "성공", f"PDF가 저장되었습니다.\n{file_path}")
             
         except ImportError:
@@ -839,6 +872,16 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self._add_log(f"[오류] PDF 저장 실패: {str(e)}")
             QMessageBox.warning(self, "오류", f"PDF 저장 실패: {str(e)}")
+    
+    @Slot()
+    def _on_open_picking_pdf(self):
+        """마지막 저장된 피킹리스트 PDF 열기"""
+        if self._last_pdf_path and Path(self._last_pdf_path).exists():
+            import os
+            os.startfile(self._last_pdf_path)
+            self._add_log(f"피킹리스트 열기: {self._last_pdf_path}")
+        else:
+            QMessageBox.warning(self, "경고", "열 수 있는 PDF 파일이 없습니다.\n먼저 피킹리스트 PDF를 저장하세요.")
     
     @Slot()
     def _on_browse_save_path(self):
