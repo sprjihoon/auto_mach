@@ -270,89 +270,89 @@ class ExcelLoader(QObject):
                     has_order_time = 'order_time' in self.df.columns
                     
                     if has_order_date or has_order_time:
-                    def combine_datetime(row):
-                        """주문일과 주문시간을 합쳐서 datetime 생성"""
-                        order_date = None
-                        order_time = None
-                        
-                        # 주문일 찾기 (pandas Series는 인덱스로 접근)
-                        if has_order_date:
-                            try:
-                                order_date = row['order_date'] if 'order_date' in row.index else None
-                            except:
-                                order_date = None
-                        # 주문시간 찾기
-                        if has_order_time:
-                            try:
-                                order_time = row['order_time'] if 'order_time' in row.index else None
-                            except:
-                                order_time = None
-                        
-                        # 주문일 처리
-                        if pd.notna(order_date):
-                            if isinstance(order_date, datetime):
-                                date_part = order_date
-                            elif isinstance(order_date, str):
+                        def combine_datetime(row):
+                            """주문일과 주문시간을 합쳐서 datetime 생성"""
+                            order_date = None
+                            order_time = None
+                            
+                            # 주문일 찾기 (pandas Series는 인덱스로 접근)
+                            if has_order_date:
                                 try:
-                                    date_part = pd.to_datetime(order_date).to_pydatetime()
+                                    order_date = row['order_date'] if 'order_date' in row.index else None
                                 except:
-                                    date_part = None
+                                    order_date = None
+                            # 주문시간 찾기
+                            if has_order_time:
+                                try:
+                                    order_time = row['order_time'] if 'order_time' in row.index else None
+                                except:
+                                    order_time = None
+                            
+                            # 주문일 처리
+                            if pd.notna(order_date):
+                                if isinstance(order_date, datetime):
+                                    date_part = order_date
+                                elif isinstance(order_date, str):
+                                    try:
+                                        date_part = pd.to_datetime(order_date).to_pydatetime()
+                                    except:
+                                        date_part = None
+                                else:
+                                    try:
+                                        date_part = pd.to_datetime(order_date).to_pydatetime()
+                                    except:
+                                        date_part = None
                             else:
-                                try:
-                                    date_part = pd.to_datetime(order_date).to_pydatetime()
-                                except:
-                                    date_part = None
-                        else:
-                            date_part = None
-                        
-                        # 주문시간 처리
-                        if pd.notna(order_time):
-                            if isinstance(order_time, datetime):
-                                time_part = order_time
-                            elif isinstance(order_time, str):
-                                try:
-                                    # 시간 문자열 파싱 (예: "10:30:00", "10:30")
-                                    time_str = str(order_time).strip()
-                                    if ':' in time_str:
-                                        parts = time_str.split(':')
-                                        if len(parts) >= 2:
-                                            hour = int(parts[0])
-                                            minute = int(parts[1])
-                                            second = int(parts[2]) if len(parts) > 2 else 0
-                                            time_part = datetime(1900, 1, 1, hour, minute, second).time()
+                                date_part = None
+                            
+                            # 주문시간 처리
+                            if pd.notna(order_time):
+                                if isinstance(order_time, datetime):
+                                    time_part = order_time
+                                elif isinstance(order_time, str):
+                                    try:
+                                        # 시간 문자열 파싱 (예: "10:30:00", "10:30")
+                                        time_str = str(order_time).strip()
+                                        if ':' in time_str:
+                                            parts = time_str.split(':')
+                                            if len(parts) >= 2:
+                                                hour = int(parts[0])
+                                                minute = int(parts[1])
+                                                second = int(parts[2]) if len(parts) > 2 else 0
+                                                time_part = datetime(1900, 1, 1, hour, minute, second).time()
+                                            else:
+                                                time_part = None
                                         else:
                                             time_part = None
-                                    else:
+                                    except:
                                         time_part = None
-                                except:
-                                    time_part = None
+                                else:
+                                    try:
+                                        time_part = pd.to_datetime(order_time).to_pydatetime().time()
+                                    except:
+                                        time_part = None
                             else:
-                                try:
-                                    time_part = pd.to_datetime(order_time).to_pydatetime().time()
-                                except:
-                                    time_part = None
-                        else:
-                            time_part = None
-                        
-                        # 날짜와 시간 합치기
-                        if date_part:
-                            if isinstance(date_part, datetime):
-                                if time_part:
-                                    if isinstance(time_part, datetime):
-                                        return time_part.replace(year=date_part.year, month=date_part.month, day=date_part.day)
-                                    elif hasattr(time_part, 'hour'):
-                                        return date_part.replace(hour=time_part.hour, minute=time_part.minute, second=time_part.second)
-                                return date_part
-                            else:
-                                try:
-                                    date_dt = pd.to_datetime(date_part).to_pydatetime()
-                                    if time_part and hasattr(time_part, 'hour'):
-                                        return date_dt.replace(hour=time_part.hour, minute=time_part.minute, second=time_part.second)
-                                    return date_dt
-                                except:
-                                    pass
-                        
-                        return None
+                                time_part = None
+                            
+                            # 날짜와 시간 합치기
+                            if date_part:
+                                if isinstance(date_part, datetime):
+                                    if time_part:
+                                        if isinstance(time_part, datetime):
+                                            return time_part.replace(year=date_part.year, month=date_part.month, day=date_part.day)
+                                        elif hasattr(time_part, 'hour'):
+                                            return date_part.replace(hour=time_part.hour, minute=time_part.minute, second=time_part.second)
+                                    return date_part
+                                else:
+                                    try:
+                                        date_dt = pd.to_datetime(date_part).to_pydatetime()
+                                        if time_part and hasattr(time_part, 'hour'):
+                                            return date_dt.replace(hour=time_part.hour, minute=time_part.minute, second=time_part.second)
+                                        return date_dt
+                                    except:
+                                        pass
+                            
+                            return None
                     
                     # 각 행에 대해 datetime 생성
                     self.df['order_datetime'] = self.df.apply(combine_datetime, axis=1)
@@ -434,6 +434,36 @@ class ExcelLoader(QObject):
         
         mask = (df_barcodes == barcode) & (self.df['used'] == 0)
         return self.df[mask].copy()
+    
+    def find_tracking_by_order_no(self, order_no: str) -> Optional[str]:
+        """
+        주문번호로 tracking_no 찾기 (재출력용)
+        
+        Args:
+            order_no: 주문번호
+        
+        Returns:
+            tracking_no 또는 None
+        """
+        if self.df is None:
+            return None
+        
+        if 'order_no' not in self.df.columns:
+            return None
+        
+        # 주문번호를 문자열로 변환하고 공백 제거하여 비교
+        order_no = str(order_no).strip()
+        df_order_nos = self.df['order_no'].astype(str).str.strip()
+        
+        # 주문번호로 필터링
+        matches = self.df[df_order_nos == order_no]
+        
+        if not matches.empty:
+            # 첫 번째 tracking_no 반환
+            tracking_no = matches.iloc[0]['tracking_no']
+            return str(tracking_no).strip() if pd.notna(tracking_no) else None
+        
+        return None
     
     def set_priority_rules(self, rules: Dict[str, bool]):
         """

@@ -10,6 +10,7 @@ from typing import Optional, Dict, List, Tuple
 from PySide6.QtCore import QObject, Signal
 
 from utils import get_pdf_path, pdf_exists
+from printer_manager import print_pdf_with_printer, load_printer_settings
 
 # PDF 처리 라이브러리 (고정밀 인식을 위해 여러 라이브러리 사용)
 try:
@@ -37,6 +38,15 @@ class PDFPrinter(QObject):
         self._temp_dir = Path(tempfile.gettempdir()) / "auto_mach_labels"
         self._temp_dir.mkdir(exist_ok=True)
         self._keep_temp_files = False  # 출력 후 임시 파일 삭제 (기본값: False)
+        
+        # 주문서 출력 기능 (두 번째 PDF 및 프린터)
+        self._order_sheet_enabled = False  # 주문서 출력 활성화 여부
+        self._pdf_file_2: Optional[Path] = None  # 두 번째 PDF 파일 (주문서)
+        self._printer_name_2: Optional[str] = None  # 두 번째 프린터 이름
+        self._tracking_index_2: Dict[str, Tuple[Path, int]] = {}  # 두 번째 PDF 인덱스
+        
+        # 송장 출력 프린터 (첫 번째 PDF)
+        self._printer_name_1: Optional[str] = None  # 첫 번째 프린터 이름 (송장)
     
     @property
     def enabled(self) -> bool:
@@ -55,6 +65,32 @@ class PDFPrinter(QObject):
     def keep_temp_files(self, value: bool):
         """임시 파일 보관 여부 설정 (True: 출력 후에도 임시 파일 유지, False: 출력 후 삭제)"""
         self._keep_temp_files = value
+    
+    @property
+    def order_sheet_enabled(self) -> bool:
+        """주문서 출력 활성화 여부"""
+        return self._order_sheet_enabled
+    
+    @order_sheet_enabled.setter
+    def order_sheet_enabled(self, value: bool):
+        """주문서 출력 활성화 여부 설정"""
+        self._order_sheet_enabled = value
+    
+    def set_pdf_file_2(self, path: str):
+        """두 번째 PDF 파일 설정 (주문서)"""
+        if path:
+            self._pdf_file_2 = Path(path)
+        else:
+            self._pdf_file_2 = None
+            self._tracking_index_2.clear()
+    
+    def set_printer_1(self, printer_name: str):
+        """첫 번째 프린터 이름 설정 (송장 출력용)"""
+        self._printer_name_1 = printer_name if printer_name else None
+    
+    def set_printer_2(self, printer_name: str):
+        """두 번째 프린터 이름 설정"""
+        self._printer_name_2 = printer_name if printer_name else None
     
     def set_labels_directory(self, path: str):
         """라벨 PDF 폴더 경로 설정 (하위 호환)"""
@@ -401,6 +437,73 @@ class PDFPrinter(QObject):
                 continue
         
         self.index_updated.emit(total_pages)
+        
+        # 두 번째 PDF 파일 인덱싱 (주문서 출력 활성화 시)
+        if self._order_sheet_enabled and self._pdf_file_2 and self._pdf_file_2.exists():
+            self._build_tracking_index_2(excel_tracking_numbers)
+        
+        return total_pages
+    
+    def _build_tracking_index_2(self, excel_tracking_numbers: List[str] = None) -> int:
+        """
+        두 번째 PDF 파일에서 송장번호 인덱스 생성 (주문서)
+        
+        Args:
+            excel_tracking_numbers: 엑셀에서 가져온 송장번호 목록
+        """
+        if not PDF_SUPPORT or not self._pdf_file_2 or not self._pdf_file_2.exists():
+            return 0
+        
+        self._tracking_index_2.clear()
+        total_pages = 0
+        
+        try:
+            import re
+            # 첫 번째 PDF와 동일한 패턴 사용
+            patterns = [
+                r'등기번호[:\s\-]*([0-9]{5}[-–—\s]{0,2}\d{4}[-–—\s]{0,2}\d{4})',
+                r'송장번호[:\s\-]*([0-9]{5}[-–—\s]{0,2}\d{4}[-–—\s]{0,2}\d{4})',
+                r'(\d{5}[-–—\s]+\d{4}[-–—\s]+\d{4})',
+                r'(\d{5}\s*[-–—]\s*\d{4}\s*[-–—]\s*\d{4})',
+                r'\b(\d{13})\b',
+                r'(?<!\d)(\d{13})(?!\d)',
+                r'\b(\d{12})\b',
+                r'(?<!\d)(\d{12})(?!\d)',
+                r'\b(\d{11})\b',
+                r'(?<!\d)(\d{11})(?!\d)',
+            ]
+            
+            # PyMuPDF로 PDF 열기
+            doc = fitz.open(str(self._pdf_file_2))
+            total_pages = len(doc)
+            found_matches = set()
+            
+            for page_num in range(total_pages):
+                page = doc[page_num]
+                original_text = page.get_text() or ""
+                
+                # 패턴 매칭
+                for pattern in patterns:
+                    matches = re.findall(pattern, original_text)
+                    for match in matches:
+                        clean_match = re.sub(r'[-–—\s]', '', match)
+                        if clean_match.isdigit() and len(clean_match) >= 10:
+                            if clean_match in found_matches:
+                                continue
+                            found_matches.add(clean_match)
+                            
+                            if clean_match not in self._tracking_index_2:
+                                self._tracking_index_2[clean_match] = (self._pdf_file_2, page_num)
+                                # 원본 형식도 저장
+                                if match != clean_match and match not in self._tracking_index_2:
+                                    self._tracking_index_2[match] = (self._pdf_file_2, page_num)
+            
+            doc.close()
+            self.print_success.emit(f"두 번째 PDF 인덱싱 완료: {len(self._tracking_index_2)}개 송장번호, {total_pages}페이지")
+            
+        except Exception as e:
+            self.print_error.emit(f"두 번째 PDF 인덱싱 오류: {str(e)}")
+        
         return total_pages
     
     def get_indexed_tracking_numbers(self) -> List[str]:
@@ -588,6 +691,105 @@ class PDFPrinter(QObject):
             self.print_error.emit(f"페이지 추출 오류: {str(e)}")
             return None
     
+    def _extract_page_to_temp_2(self, tracking_no: str, pdf_path: Path, page_num: int) -> Optional[Path]:
+        """
+        두 번째 PDF에서 송장번호에 해당하는 페이지를 임시 PDF로 추출 (주문서)
+        extract_page_to_temp와 동일한 로직이지만 두 번째 PDF 인덱스 사용
+        """
+        self.print_success.emit(f"[주문서] 페이지 추출 시작: {tracking_no} → {pdf_path.name} 페이지 {page_num + 1}")
+        
+        try:
+            import re
+            clean_tracking_no = re.sub(r'[-–—\s]', '', tracking_no)
+            
+            doc = fitz.open(str(pdf_path))
+            total_pages = len(doc)
+            
+            if page_num >= total_pages:
+                doc.close()
+                self.print_error.emit(f"[주문서] 페이지 번호 오류: {page_num + 1} (총 {total_pages}페이지)")
+                return None
+            
+            # 시작/끝 페이지 결정 (2장 송장 처리)
+            start_page = page_num
+            end_page = page_num
+            
+            # 다음 페이지 확인 (2장 송장 처리)
+            if page_num + 1 < total_pages:
+                next_page = doc[page_num + 1]
+                next_text = next_page.get_text() or ""
+                
+                # 다음 페이지에 다른 송장번호가 있는지 확인
+                next_tracking_patterns = [
+                    r'등기번호[:\s\-]*([0-9]{5}[-–—\s]{0,2}\d{4}[-–—\s]{0,2}\d{4})',
+                    r'송장번호[:\s\-]*([0-9]{5}[-–—\s]{0,2}\d{4}[-–—\s]{0,2}\d{4})',
+                    r'(\d{5}[-–—\s]+\d{4}[-–—\s]+\d{4})',
+                    r'\b\d{13}\b',
+                    r'\b\d{12}\b',
+                    r'\b\d{11}\b',
+                ]
+                
+                next_has_tracking = False
+                for pattern in next_tracking_patterns:
+                    matches = re.findall(pattern, next_text)
+                    for match in matches:
+                        clean_match = re.sub(r'[-–—\s]', '', match)
+                        if clean_match.isdigit() and len(clean_match) >= 10:
+                            if clean_match != clean_tracking_no:
+                                next_has_tracking = True
+                                break
+                    if next_has_tracking:
+                        break
+                
+                # 다음 페이지에 송장번호가 없고, 고객 정보나 제품 정보가 있으면 포함
+                if not next_has_tracking:
+                    has_customer_info = any(keyword in next_text for keyword in [
+                        '수령자', '받는분', '수신인', '고객', '주문자',
+                        '상품명', '제품명', '품목', '수량', '개'
+                    ])
+                    
+                    if has_customer_info or len(next_text.strip()) > 20:
+                        end_page = page_num + 1
+                        self.print_success.emit(f"[주문서] ✓ 2장 송장 감지: 다음 페이지({page_num + 2})도 함께 출력")
+            
+            # 페이지 추출
+            optimized_doc = fitz.open()
+            for page_idx in range(start_page, end_page + 1):
+                page = doc[page_idx]
+                original_rect = page.rect
+                clip_rect = self._detect_content_rect(page)
+                original_rotation = page.rotation
+                
+                dpi = 300
+                zoom = dpi / 72
+                mat = fitz.Matrix(zoom, zoom)
+                pix = page.get_pixmap(matrix=mat, clip=clip_rect, alpha=False)
+                
+                if original_rotation in [90, 270]:
+                    new_page = optimized_doc.new_page(width=original_rect.height, height=original_rect.width)
+                else:
+                    new_page = optimized_doc.new_page(width=original_rect.width, height=original_rect.height)
+                
+                target_rect = fitz.Rect(0, 0, new_page.rect.width, new_page.rect.height)
+                new_page.insert_image(target_rect, pixmap=pix, rotate=0, keep_proportion=True, overlay=True)
+            
+            temp_path = self._temp_dir / f"order_{clean_tracking_no}.pdf"
+            if temp_path.exists():
+                temp_path.unlink()
+            optimized_doc.save(str(temp_path))
+            
+            optimized_doc.close()
+            doc.close()
+            
+            extracted_pages = end_page - start_page + 1
+            pages_info = f"{extracted_pages}장" if extracted_pages > 1 else "1장"
+            self.print_success.emit(f"[주문서] ✅ PDF 생성 완료: {temp_path.name} ({pages_info})")
+            return temp_path
+            
+        except Exception as e:
+            self.print_error.emit(f"[주문서] 페이지 추출 오류: {str(e)}")
+            return None
+    
     def get_pdf_path(self, tracking_no: str) -> Path:
         """tracking_no로 PDF 경로 반환"""
         if self._labels_dir:
@@ -599,10 +801,37 @@ class PDFPrinter(QObject):
         PDF 자동 출력
         1. 인덱스에서 송장번호 찾기 → 해당 페이지만 추출하여 출력
         2. 없으면 {tracking_no}.pdf 파일 직접 출력
+        3. 주문서 출력 활성화 시 두 번째 PDF도 동시 출력
         """
         if not self._enabled:
             self.print_error.emit("PDF 출력이 비활성화되어 있습니다")
             return False
+        
+        # 첫 번째 PDF 출력 (기존 로직)
+        result1 = self._print_pdf_single(tracking_no, is_second=False)
+        
+        # 두 번째 PDF 출력 (주문서 출력 활성화 시)
+        if self._order_sheet_enabled and self._pdf_file_2 and self._printer_name_2:
+            import threading
+            thread = threading.Thread(
+                target=self._print_pdf_single,
+                args=(tracking_no, True),
+                daemon=True
+            )
+            thread.start()
+            # 첫 번째 출력 결과 반환 (두 번째는 백그라운드에서 실행)
+            return result1
+        else:
+            return result1
+    
+    def _print_pdf_single(self, tracking_no: str, is_second: bool = False) -> bool:
+        """
+        단일 PDF 출력 (내부 메서드)
+        
+        Args:
+            tracking_no: 송장번호
+            is_second: True면 두 번째 PDF 출력, False면 첫 번째 PDF 출력
+        """
         
         import re
         
@@ -615,165 +844,195 @@ class PDFPrinter(QObject):
         original_pdf_path = None
         page_num = None
         
+        # 두 번째 PDF인지에 따라 인덱스 선택
+        if is_second:
+            tracking_index = self._tracking_index_2
+            pdf_file = self._pdf_file_2
+            printer_name = self._printer_name_2
+            prefix = "[주문서] "
+        else:
+            tracking_index = self._tracking_index
+            pdf_file = self._pdf_file
+            printer_name = None  # 기본 프린터 사용
+            prefix = "[라벨] "
+        
         # 디버깅: 인덱스에 있는 송장번호 목록 확인
-        indexed_tracking_nos = list(self._tracking_index.keys())[:10]  # 처음 10개만
-        self.print_success.emit(f"인덱스 확인: 검색 대상 {tracking_no} (정규화: {clean_tracking_no}), 인덱스에 {len(self._tracking_index)}개 송장번호 존재")
+        indexed_tracking_nos = list(tracking_index.keys())[:10]  # 처음 10개만
+        self.print_success.emit(f"{prefix}인덱스 확인: 검색 대상 {tracking_no} (정규화: {clean_tracking_no}), 인덱스에 {len(tracking_index)}개 송장번호 존재")
         if indexed_tracking_nos:
-            self.print_success.emit(f"인덱스 샘플: {', '.join(map(str, indexed_tracking_nos))}")
+            self.print_success.emit(f"{prefix}인덱스 샘플: {', '.join(map(str, indexed_tracking_nos))}")
         
         # 디버깅: 전체 인덱스 매핑 상태 확인 (송장번호 → 페이지)
         mapping_info = []
-        for key, (pdf_file, page_num) in self._tracking_index.items():
+        for key, (pdf_file_path, page_num) in tracking_index.items():
             if len(key) >= 10:  # 송장번호만 (너무 짧은 키 제외)
                 mapping_info.append(f"{key}→페이지{page_num + 1}")
         
         if mapping_info:
             sample_mappings = mapping_info[:8]  # 처음 8개만
-            self.print_success.emit(f"송장→페이지 매핑: {', '.join(sample_mappings)}" + ("..." if len(mapping_info) > 8 else ""))
+            self.print_success.emit(f"{prefix}송장→페이지 매핑: {', '.join(sample_mappings)}" + ("..." if len(mapping_info) > 8 else ""))
         
         search_keys = [clean_tracking_no, tracking_no]
         matched_key = None
         for key in search_keys:
-            if key in self._tracking_index:
-                original_pdf_path, page_num = self._tracking_index[key]
+            if key in tracking_index:
+                original_pdf_path, page_num = tracking_index[key]
                 matched_key = key
-                self.print_success.emit(f"✓ 송장번호 매칭 성공: '{tracking_no}' → 인덱스 키 '{matched_key}' (원본: {original_pdf_path.name}, 페이지: {page_num + 1})")
+                self.print_success.emit(f"{prefix}✓ 송장번호 매칭 성공: '{tracking_no}' → 인덱스 키 '{matched_key}' (원본: {original_pdf_path.name}, 페이지: {page_num + 1})")
                 break
         
         if not matched_key:
-            self.print_error.emit(f"✗ 송장번호 매칭 실패: '{tracking_no}' (정규화: '{clean_tracking_no}')를 인덱스에서 찾을 수 없습니다")
+            if is_second:
+                # 두 번째 PDF는 없어도 경고만 (첫 번째는 계속 진행)
+                self.print_error.emit(f"{prefix}✗ 송장번호 매칭 실패: '{tracking_no}' (정규화: '{clean_tracking_no}')를 인덱스에서 찾을 수 없습니다")
+                return False
+            else:
+                self.print_error.emit(f"{prefix}✗ 송장번호 매칭 실패: '{tracking_no}' (정규화: '{clean_tracking_no}')를 인덱스에서 찾을 수 없습니다")
         
         # 2. 해당 페이지를 임시 파일로 추출하여 실물 프린터로 인쇄
         if original_pdf_path and page_num is not None:
-            # 매칭된 키로 페이지 추출
-            pdf_path = self.extract_page_to_temp(matched_key)
+            # 두 번째 PDF인 경우 별도 추출 메서드 사용
+            if is_second:
+                pdf_path = self._extract_page_to_temp_2(matched_key, original_pdf_path, page_num)
+            else:
+                pdf_path = self.extract_page_to_temp(matched_key)
             if not pdf_path:
-                self.print_error.emit(f"페이지 추출 실패: {tracking_no} (매칭 키: {matched_key})")
+                self.print_error.emit(f"{prefix}페이지 추출 실패: {tracking_no} (매칭 키: {matched_key})")
                 return False
         else:
             # 인덱스에 없으면 직접 파일 찾기 (하이픈 제거 버전으로 검색)
+            if is_second:
+                self.print_error.emit(f"{prefix}PDF 파일 없음: {clean_tracking_no}")
+                return False
             pdf_path = self.get_pdf_path(clean_tracking_no)
             if not pdf_path.exists():
                 # 원본 형식으로도 시도
                 pdf_path = self.get_pdf_path(tracking_no)
                 if not pdf_path.exists():
-                    self.print_error.emit(f"PDF 파일 없음: {clean_tracking_no}")
+                    self.print_error.emit(f"{prefix}PDF 파일 없음: {clean_tracking_no}")
                     return False
         
         try:
-            import subprocess
+            # 프린터 이름 결정 (printer_manager 설정 우선 사용)
+            if is_second:
+                # 주문서: settings.json의 a4_printer 또는 UI에서 선택한 프린터
+                settings = load_printer_settings()
+                target_printer_name = settings.get("a4_printer") or self._printer_name_2
+            else:
+                # 송장: settings.json의 label_printer 또는 UI에서 선택한 프린터
+                settings = load_printer_settings()
+                target_printer_name = settings.get("label_printer") or self._printer_name_1
+            
+            # printer_manager를 사용하여 출력
             pdf_path_str = str(pdf_path)
+            success = print_pdf_with_printer(pdf_path_str, target_printer_name)
             
-            # win32api, win32print는 선택적 (pywin32 설치 시에만 사용)
-            try:
-                import win32api
-                import win32print
-                HAS_WIN32API = True
-            except ImportError:
-                HAS_WIN32API = False
-            
-            # 실물 프린터로 직접 인쇄 (기본 프린터 사용)
-            
-            # 방법 1: Adobe Reader로 실물 프린터 인쇄 (가장 확실한 방법)
-            # /t 옵션: 기본 프린터로 인쇄 후 자동 종료 (사용자 클릭 불필요)
-            adobe_readers = [
-                r"C:\Program Files\Adobe\Acrobat Reader DC\Reader\AcroRd32.exe",
-                r"C:\Program Files (x86)\Adobe\Acrobat Reader DC\Reader\AcroRd32.exe",
-                r"C:\Program Files\Adobe\Acrobat DC\Acrobat\Acrobat.exe",
-                r"C:\Program Files (x86)\Adobe\Acrobat DC\Acrobat\Acrobat.exe",
-            ]
-            
-            for reader_path in adobe_readers:
-                if os.path.exists(reader_path):
+            if success:
+                printer_display = target_printer_name if target_printer_name else "기본 프린터"
+                self.print_success.emit(f"{prefix}PDF 출력 요청 완료: {tracking_no} → {printer_display}")
+                
+                # 출력 후 임시 파일 삭제 (기본값: 삭제)
+                if not self._keep_temp_files and pdf_path and pdf_path.exists():
+                    import time
+                    time.sleep(2)  # 2초 대기
                     try:
-                        # Adobe Reader/Acrobat로 기본 프린터에 직접 인쇄
-                        # /t "파일" "프린터명": 지정된 프린터로 인쇄 후 종료
-                        # /p "파일": 기본 프린터로 인쇄 (인쇄 대화상자 없이)
-                        
-                        # 기본 프린터 이름 가져오기
-                        printer_name = None
-                        if HAS_WIN32API:
-                            try:
-                                printer_name = win32print.GetDefaultPrinter()
-                            except:
-                                pass
-                        
-                        # 프린터 이름이 있으면 /t 옵션 사용, 없으면 /p 사용
-                        if printer_name:
-                            # /t "파일" "프린터명" - 지정된 프린터로 인쇄 후 종료
-                            cmd = [reader_path, "/t", pdf_path_str, printer_name]
-                            self.print_success.emit(f"인쇄 명령: {reader_path} /t → {printer_name}")
-                        else:
-                            # /p "파일" - 기본 프린터로 인쇄
-                            cmd = [reader_path, "/p", pdf_path_str]
-                            self.print_success.emit(f"인쇄 명령: {reader_path} /p")
-                        
-                        # 프린터로 인쇄 명령 전송
-                        subprocess.Popen(
-                            cmd,
-                            shell=False,
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                            creationflags=subprocess.CREATE_NO_WINDOW
-                        )
-                        
-                        # 인쇄 명령 전송 완료
-                        result_returncode = 0  # Popen은 즉시 반환
-                        
-                        # 실행 결과 확인
-                        if result_returncode == 0:
-                            self.print_success.emit(f"Adobe Reader 인쇄 명령 전송 성공: {tracking_no}")
-                            
-                            # 출력 후 임시 파일 삭제 (기본값: 삭제)
-                            if not self._keep_temp_files and pdf_path and pdf_path.exists():
-                                # 인쇄 명령 전송 후 잠시 대기 후 삭제 (인쇄가 시작될 시간 확보)
-                                import time
-                                time.sleep(2)  # 2초 대기
-                                try:
-                                    pdf_path.unlink()
-                                    self.print_success.emit(f"임시 파일 삭제: {pdf_path.name}")
-                                except Exception as e:
-                                    # 삭제 실패해도 인쇄는 정상 진행됨
-                                    self.print_success.emit(f"임시 파일 삭제 실패 (무시): {str(e)}")
-                        else:
-                            self.print_error.emit(f"Adobe Reader 인쇄 실패")
-                        if HAS_WIN32API:
-                            try:
-                                default_printer = win32print.GetDefaultPrinter()
-                                self.print_success.emit(f"Adobe Reader 인쇄 요청 완료: {tracking_no} → {default_printer}")
-                                
-                                # 프린터 상태 확인 (선택적, 백그라운드에서 실행)
-                                # Adobe Reader가 인쇄 명령을 처리하는데 시간이 걸릴 수 있으므로
-                                # 큐 확인은 정보성으로만 사용
-                                import time
-                                time.sleep(3)  # 3초 대기 후 상태 확인
-                                
-                                # 프린터 큐 확인 (정보성, 오류 아님)
-                                try:
-                                    printer_handle = win32print.OpenPrinter(default_printer)
-                                    jobs = win32print.EnumJobs(printer_handle, 0, -1, 1)
-                                    win32print.ClosePrinter(printer_handle)
-                                    
-                                    if jobs:
-                                        self.print_success.emit(f"프린터 큐에 {len(jobs)}개 작업 대기 중")
-                                    else:
-                                        # 큐에 작업이 없어도 정상일 수 있음 (빠른 처리 또는 다른 프린터)
-                                        # 오류가 아닌 정보 메시지로 변경
-                                        self.print_success.emit(f"인쇄 명령 전송 완료 (프린터 큐 확인 중...)")
-                                except Exception as e:
-                                    # 프린터 상태 확인 실패해도 인쇄는 정상 진행될 수 있음
-                                    self.print_success.emit(f"인쇄 명령 전송 완료: {tracking_no}")
-                                    
-                            except:
-                                self.print_success.emit(f"Adobe Reader 인쇄 요청 완료: {tracking_no} (기본 프린터)")
-                        else:
-                            self.print_success.emit(f"Adobe Reader 인쇄 요청 완료: {tracking_no} (기본 프린터)")
-                        return True
+                        pdf_path.unlink()
+                        self.print_success.emit(f"{prefix}임시 파일 삭제: {pdf_path.name}")
                     except Exception as e:
-                        self.print_error.emit(f"Adobe Reader 인쇄 오류: {str(e)}")
-                        continue
+                        self.print_success.emit(f"{prefix}임시 파일 삭제 실패 (무시): {str(e)}")
+                
+                return True
+            else:
+                self.print_error.emit(f"{prefix}PDF 출력 실패: {tracking_no}")
+                return False
             
-            # 방법 2: Windows 기본 PDF 뷰어 찾아서 인쇄
+            # 기존 Adobe Reader 방식 (백업, 필요시 사용)
+            # import subprocess
+            # pdf_path_str = str(pdf_path)
+            # 
+            # # win32api, win32print는 선택적 (pywin32 설치 시에만 사용)
+            # try:
+            #     import win32api
+            #     import win32print
+            #     HAS_WIN32API = True
+            # except ImportError:
+            #     HAS_WIN32API = False
+            # 
+            # # 실물 프린터로 직접 인쇄 (기본 프린터 사용)
+            # 
+            # # 방법 1: Adobe Reader로 실물 프린터 인쇄 (가장 확실한 방법)
+            # # /t 옵션: 기본 프린터로 인쇄 후 자동 종료 (사용자 클릭 불필요)
+            # adobe_readers = [
+            #     r"C:\Program Files\Adobe\Acrobat Reader DC\Reader\AcroRd32.exe",
+            #     r"C:\Program Files (x86)\Adobe\Acrobat Reader DC\Reader\AcroRd32.exe",
+            #     r"C:\Program Files\Adobe\Acrobat DC\Acrobat\Acrobat.exe",
+            #     r"C:\Program Files (x86)\Adobe\Acrobat DC\Acrobat\Acrobat.exe",
+            # ]
+            # 
+            # for reader_path in adobe_readers:
+            #     if os.path.exists(reader_path):
+            #         try:
+            #             # Adobe Reader/Acrobat로 기본 프린터에 직접 인쇄
+            #             # /t "파일" "프린터명": 지정된 프린터로 인쇄 후 종료
+            #             # /p "파일": 기본 프린터로 인쇄 (인쇄 대화상자 없이)
+            #             
+            #             # 프린터 이름 결정 (선택된 프린터 우선 사용)
+            #             if is_second:
+            #                 target_printer_name = self._printer_name_2
+            #             else:
+            #                 target_printer_name = self._printer_name_1  # 첫 번째 프린터 (송장)
+            #             
+            #             if not target_printer_name and HAS_WIN32API:
+            #                 try:
+            #                     target_printer_name = win32print.GetDefaultPrinter()
+            #                 except:
+            #                     pass
+            #             
+            #             # 프린터 이름이 있으면 /t 옵션 사용, 없으면 /p 사용
+            #             if target_printer_name:
+            #                 # /t "파일" "프린터명" - 지정된 프린터로 인쇄 후 종료
+            #                 cmd = [reader_path, "/t", pdf_path_str, target_printer_name]
+            #                 self.print_success.emit(f"{prefix}인쇄 명령: {reader_path} /t → {target_printer_name}")
+            #             else:
+            #                 # /p "파일" - 기본 프린터로 인쇄
+            #                 cmd = [reader_path, "/p", pdf_path_str]
+            #                 self.print_success.emit(f"{prefix}인쇄 명령: {reader_path} /p")
+            #             
+            #             # 프린터로 인쇄 명령 전송
+            #             subprocess.Popen(
+            #                 cmd,
+            #                 shell=False,
+            #                 stdout=subprocess.DEVNULL,
+            #                 stderr=subprocess.DEVNULL,
+            #                 creationflags=subprocess.CREATE_NO_WINDOW
+            #             )
+            #             
+            #             # 인쇄 명령 전송 완료
+            #             result_returncode = 0  # Popen은 즉시 반환
+            #             
+            #             # 실행 결과 확인
+            #             if result_returncode == 0:
+            #                 self.print_success.emit(f"{prefix}Adobe Reader 인쇄 명령 전송 성공: {tracking_no}")
+            #                 
+            #                 # 출력 후 임시 파일 삭제 (기본값: 삭제)
+            #                 if not self._keep_temp_files and pdf_path and pdf_path.exists():
+            #                     # 인쇄 명령 전송 후 잠시 대기 후 삭제 (인쇄가 시작될 시간 확보)
+            #                     import time
+            #                     time.sleep(2)  # 2초 대기
+            #                     try:
+            #                         pdf_path.unlink()
+            #                         self.print_success.emit(f"{prefix}임시 파일 삭제: {pdf_path.name}")
+            #                     except Exception as e:
+            #                         # 삭제 실패해도 인쇄는 정상 진행됨
+            #                         self.print_success.emit(f"{prefix}임시 파일 삭제 실패 (무시): {str(e)}")
+            #             else:
+            #                 self.print_error.emit(f"{prefix}Adobe Reader 인쇄 실패")
+        except Exception as e:
+            self.print_error.emit(f"{prefix}PDF 출력 오류: {str(e)}")
+            return False
+        
+        # 기존 백업 방법들 (printer_manager 실패 시 사용)
+        # 방법 2: Windows 기본 PDF 뷰어 찾아서 인쇄
             try:
                 import winreg
                 # PDF 파일의 기본 프로그램 찾기
@@ -892,6 +1151,27 @@ class PDFPrinter(QObject):
         """PDF 파일 존재 여부 확인"""
         pdf_path = self.get_pdf_path(tracking_no)
         return pdf_path.exists()
+
+
+def get_available_printers() -> List[str]:
+    """
+    Windows 시스템에서 사용 가능한 프린터 목록 반환
+    
+    Returns:
+        프린터 이름 리스트
+    """
+    printers = []
+    try:
+        import win32print
+        printer_info = win32print.EnumPrinters(win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS)
+        printers = [info[2] for info in printer_info]
+    except ImportError:
+        # pywin32가 없으면 빈 리스트 반환
+        pass
+    except Exception:
+        pass
+    
+    return printers
 
 
 def print_pdf_simple(tracking_no: str, labels_dir: str = "labels") -> bool:
