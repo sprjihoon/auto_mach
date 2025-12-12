@@ -929,17 +929,21 @@ class PDFPrinter(QObject):
             
             if success:
                 printer_display = target_printer_name if target_printer_name else "기본 프린터"
+                output_type = "주문서" if is_second else "송장"
                 self.print_success.emit(f"{prefix}PDF 출력 요청 완료: {tracking_no} → {printer_display}")
                 
-                # 출력 후 임시 파일 삭제 (기본값: 삭제)
+                # 출력 후 임시 파일 삭제 여부 확인 (송장/주문서 모두 동일하게 적용)
+                # keep_temp_files 설정이 True이면 임시 파일 보관, False이면 삭제
                 if not self._keep_temp_files and pdf_path and pdf_path.exists():
                     import time
-                    time.sleep(2)  # 2초 대기
+                    time.sleep(2)  # 2초 대기 (인쇄 시작 시간 확보)
                     try:
                         pdf_path.unlink()
-                        self.print_success.emit(f"{prefix}임시 파일 삭제: {pdf_path.name}")
+                        self.print_success.emit(f"{prefix}임시 파일 삭제: {pdf_path.name} ({output_type})")
                     except Exception as e:
-                        self.print_success.emit(f"{prefix}임시 파일 삭제 실패 (무시): {str(e)}")
+                        self.print_success.emit(f"{prefix}임시 파일 삭제 실패 (무시): {str(e)} ({output_type})")
+                elif self._keep_temp_files:
+                    self.print_success.emit(f"{prefix}임시 파일 보관: {pdf_path.name} ({output_type})")
                 
                 return True
             else:

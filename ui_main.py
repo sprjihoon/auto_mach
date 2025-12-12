@@ -183,6 +183,8 @@ from printer_manager import (
     get_printers, save_printer_settings, load_printer_settings,
     print_pdf_with_printer, check_printer_exists
 )
+from pdf_search import find_pdf_by_tracking_or_order
+from reprint_pdf_extractor import extract_pages_from_pdf
 
 
 class MainWindow(QMainWindow):
@@ -321,15 +323,49 @@ class MainWindow(QMainWindow):
         options_group = QGroupBox("출력 옵션")
         options_layout = QVBoxLayout(options_group)
         
-        # 송장(라벨) 체크박스
+        # 송장(라벨) 옵션
+        label_option_layout = QHBoxLayout()
         self.reprint_label_check = QCheckBox("송장(라벨)")
         self.reprint_label_check.setChecked(True)  # 기본 체크
-        options_layout.addWidget(self.reprint_label_check)
+        label_option_layout.addWidget(self.reprint_label_check)
         
-        # 주문서(A4) 체크박스
+        # 송장 검색 폴더 선택
+        label_option_layout.addWidget(QLabel("검색 폴더:"))
+        self.reprint_label_folder_edit = QLineEdit()
+        self.reprint_label_folder_edit.setPlaceholderText("labels")
+        self.reprint_label_folder_edit.setText("labels")  # 기본값
+        self.reprint_label_folder_edit.setMaximumWidth(200)
+        label_option_layout.addWidget(self.reprint_label_folder_edit)
+        
+        self.reprint_label_folder_btn = QPushButton("폴더 선택")
+        self.reprint_label_folder_btn.setMaximumWidth(80)
+        self.reprint_label_folder_btn.clicked.connect(self._on_browse_label_folder)
+        label_option_layout.addWidget(self.reprint_label_folder_btn)
+        
+        label_option_layout.addStretch()
+        options_layout.addLayout(label_option_layout)
+        
+        # 주문서(A4) 옵션
+        order_option_layout = QHBoxLayout()
         self.reprint_order_check = QCheckBox("주문서(A4)")
         self.reprint_order_check.setChecked(False)  # 기본 미체크
-        options_layout.addWidget(self.reprint_order_check)
+        order_option_layout.addWidget(self.reprint_order_check)
+        
+        # 주문서 검색 폴더 선택
+        order_option_layout.addWidget(QLabel("검색 폴더:"))
+        self.reprint_order_folder_edit = QLineEdit()
+        self.reprint_order_folder_edit.setPlaceholderText("orders")
+        self.reprint_order_folder_edit.setText("orders")  # 기본값
+        self.reprint_order_folder_edit.setMaximumWidth(200)
+        order_option_layout.addWidget(self.reprint_order_folder_edit)
+        
+        self.reprint_order_folder_btn = QPushButton("폴더 선택")
+        self.reprint_order_folder_btn.setMaximumWidth(80)
+        self.reprint_order_folder_btn.clicked.connect(self._on_browse_order_folder)
+        order_option_layout.addWidget(self.reprint_order_folder_btn)
+        
+        order_option_layout.addStretch()
+        options_layout.addLayout(order_option_layout)
         
         layout.addWidget(options_group)
         
@@ -346,7 +382,7 @@ class MainWindow(QMainWindow):
     
     @Slot()
     def _on_reprint_execute(self):
-        """재출력 실행"""
+        """재출력 실행 (멀티코어 PDF 검색)"""
         input_value = self.reprint_input.text().strip()
         
         if not input_value:
@@ -361,39 +397,78 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "경고", "출력할 항목을 하나 이상 선택해주세요.")
             return
         
-        # 1. tracking_no로 먼저 시도
-        tracking_no = None
-        label_path = Path("labels") / f"{input_value}.pdf"
-        order_path = Path("orders") / f"{input_value}.pdf"
+        # 검색 폴더 확인
+        label_folder = self.reprint_label_folder_edit.text().strip() if print_label else None
+        order_folder = self.reprint_order_folder_edit.text().strip() if print_order else None
         
-        if label_path.exists() or order_path.exists():
-            # PDF 파일이 존재하면 input_value를 tracking_no로 간주
-            tracking_no = input_value
-            self._add_log(f"[REPRINT-MANUAL] input={input_value} → tracking_no로 인식 (PDF 파일 존재)")
+        # 멀티코어 PDF 검색 시작
+        self._add_log(f"[REPRINT-MANUAL] PDF 검색 시작: {input_value} (멀티코어 검색)")
+        
+        # 검색할 폴더 리스트 구성
+        search_folders = []
+        if print_label and label_folder:
+            search_folders.append(label_folder)
+        if print_order and order_folder:
+            search_folders.append(order_folder)
+        
+        if not search_folders:
+            QMessageBox.warning(self, "경고", "검색할 폴더를 선택해주세요.")
+            return
+        
+        # PDF 파일 전체 검색 (멀티코어 활용)
+        search_result = find_pdf_by_tracking_or_order(input_value, search_folders)
+        
+        tracking_no = None
+        found_pdf_path = None
+        
+        if search_result:
+            # 검색 성공
+            found_pdf_path = search_result.get("pdf_path")
+            result_type = search_result.get("type")
+            
+            if result_type == "tracking":
+                tracking_no = search_result.get("tracking_no")
+                self._add_log(f"[REPRINT-MANUAL] PDF 검색 성공: 송장번호 {tracking_no} (파일: {Path(found_pdf_path).name})")
+            elif result_type == "order":
+                order_no = search_result.get("order_no")
+                self._add_log(f"[REPRINT-MANUAL] PDF 검색 성공: 주문번호 {order_no} (파일: {Path(found_pdf_path).name})")
+                
+                # 주문번호로 tracking_no 찾기 시도
+                if self.excel_loader.df is not None:
+                    tracking_no = self.excel_loader.find_tracking_by_order_no(order_no)
+                    if tracking_no:
+                        self._add_log(f"[REPRINT-MANUAL] 주문번호 {order_no} → 송장번호 {tracking_no}")
+                    else:
+                        # 엑셀에 없어도 PDF 파일명에서 추출 시도
+                        pdf_name = Path(found_pdf_path).stem
+                        # PDF 파일명이 송장번호일 수 있음
+                        tracking_no = pdf_name
         else:
-            # 2. order_no로 검색
+            # PDF 검색 실패 시 엑셀에서 검색 시도
             if self.excel_loader.df is not None:
                 tracking_no = self.excel_loader.find_tracking_by_order_no(input_value)
                 if tracking_no:
-                    self._add_log(f"[REPRINT-MANUAL] input={input_value} → order_no로 검색 → tracking_no={tracking_no}")
+                    self._add_log(f"[REPRINT-MANUAL] 엑셀에서 주문번호 검색 성공: {input_value} → {tracking_no}")
                 else:
-                    # 엑셀에 없어도 PDF 파일만 있으면 출력 허용 (안전 조건)
-                    # 하지만 여기서는 둘 다 실패
-                    QMessageBox.warning(
-                        self,
-                        "재출력 실패",
-                        f"재출력 대상이 존재하지 않습니다.\n\n"
-                        f"입력값: {input_value}\n\n"
-                        f"확인 사항:\n"
-                        f"- 송장번호가 정확한지 확인\n"
-                        f"- 주문번호가 엑셀에 있는지 확인\n"
-                        f"- PDF 파일이 labels/ 또는 orders/ 폴더에 있는지 확인"
-                    )
-                    return
+                    # 입력값을 tracking_no로 간주하고 파일 존재 확인
+                    label_path = Path("labels") / f"{input_value}.pdf"
+                    order_path = Path("orders") / f"{input_value}.pdf"
+                    
+                    if label_path.exists() or order_path.exists():
+                        tracking_no = input_value
+                        self._add_log(f"[REPRINT-MANUAL] 파일명으로 인식: {tracking_no}")
         
-        # 3. 출력 수행
+        # 검색 실패
         if not tracking_no:
-            QMessageBox.warning(self, "재출력 실패", "송장번호를 찾을 수 없습니다.")
+            QMessageBox.warning(
+                self,
+                "재출력 실패",
+                f"재출력 대상이 존재하지 않습니다.\n\n"
+                f"입력값: {input_value}\n\n"
+                f"확인 사항:\n"
+                f"- 송장번호/주문번호가 정확한지 확인\n"
+                f"- PDF 파일이 labels/ 또는 orders/ 폴더에 있는지 확인"
+            )
             return
         
         # 프린터 설정 로드
@@ -406,52 +481,126 @@ class MainWindow(QMainWindow):
         
         # 송장(라벨) 출력
         if print_label:
-            label_path = Path("labels") / f"{tracking_no}.pdf"
-            if label_path.exists():
-                if label_printer:
-                    success = print_pdf_with_printer(str(label_path), label_printer)
+            # 검색된 PDF 경로 사용 또는 선택된 폴더에서 시도
+            label_path = None
+            label_folder = self.reprint_label_folder_edit.text().strip() or "labels"
+            
+            if found_pdf_path and label_folder in found_pdf_path:
+                # 검색된 PDF가 선택된 폴더에 있으면 사용
+                label_path = Path(found_pdf_path)
+            else:
+                # 선택된 폴더에서 파일 찾기
+                label_path = Path(label_folder) / f"{tracking_no}.pdf"
+                if not label_path.exists():
+                    # 검색된 PDF가 있으면 그것 사용
+                    if found_pdf_path:
+                        label_path = Path(found_pdf_path)
+            
+            if label_path and label_path.exists():
+                # 2페이지 감지 및 추출
+                extract_result = extract_pages_from_pdf(label_path, tracking_no)
+                
+                if extract_result:
+                    temp_pdf_path, page_count = extract_result
+                    self._add_log(f"[REPRINT-MANUAL] 송장 {page_count}장 추출 완료: {tracking_no}")
+                    
+                    if label_printer:
+                        success = print_pdf_with_printer(str(temp_pdf_path), label_printer)
+                    else:
+                        success = print_pdf_with_printer(str(temp_pdf_path), None)
+                    
                     if success:
-                        self._add_log(f"[REPRINT-MANUAL] 송장 출력 성공: {tracking_no} → {label_printer}")
+                        printer_display = label_printer if label_printer else "기본 프린터"
+                        self._add_log(f"[REPRINT-MANUAL] 송장 출력 성공: {tracking_no} ({page_count}장) → {printer_display}")
                         success_count += 1
                     else:
                         self._add_log(f"[REPRINT-MANUAL] 송장 출력 실패: {tracking_no}")
                         fail_count += 1
+                    
+                    # 임시 파일 삭제 (keep_temp_files 설정 확인)
+                    if not self.pdf_printer.keep_temp_files and temp_pdf_path.exists():
+                        try:
+                            temp_pdf_path.unlink()
+                        except:
+                            pass
                 else:
-                    # 프린터가 설정되지 않았으면 기본 프린터 사용
-                    success = print_pdf_with_printer(str(label_path), None)
+                    # 추출 실패 시 원본 파일 직접 출력
+                    if label_printer:
+                        success = print_pdf_with_printer(str(label_path), label_printer)
+                    else:
+                        success = print_pdf_with_printer(str(label_path), None)
+                    
                     if success:
-                        self._add_log(f"[REPRINT-MANUAL] 송장 출력 성공: {tracking_no} (기본 프린터)")
+                        printer_display = label_printer if label_printer else "기본 프린터"
+                        self._add_log(f"[REPRINT-MANUAL] 송장 출력 성공: {tracking_no} (원본 파일) → {printer_display}")
                         success_count += 1
                     else:
                         self._add_log(f"[REPRINT-MANUAL] 송장 출력 실패: {tracking_no}")
                         fail_count += 1
             else:
-                self._add_log(f"[REPRINT-MANUAL] 송장 PDF 파일 없음: {label_path}")
+                self._add_log(f"[REPRINT-MANUAL] 송장 PDF 파일 없음: {tracking_no}")
                 fail_count += 1
         
         # 주문서(A4) 출력
         if print_order:
-            order_path = Path("orders") / f"{tracking_no}.pdf"
-            if order_path.exists():
-                if a4_printer:
-                    success = print_pdf_with_printer(str(order_path), a4_printer)
+            # 검색된 PDF 경로 사용 또는 선택된 폴더에서 시도
+            order_path = None
+            order_folder = self.reprint_order_folder_edit.text().strip() or "orders"
+            
+            if found_pdf_path and order_folder in found_pdf_path:
+                # 검색된 PDF가 선택된 폴더에 있으면 사용
+                order_path = Path(found_pdf_path)
+            else:
+                # 선택된 폴더에서 파일 찾기
+                order_path = Path(order_folder) / f"{tracking_no}.pdf"
+                if not order_path.exists():
+                    # 검색된 PDF가 있으면 그것 사용
+                    if found_pdf_path:
+                        order_path = Path(found_pdf_path)
+            
+            if order_path and order_path.exists():
+                # 2페이지 감지 및 추출
+                extract_result = extract_pages_from_pdf(order_path, tracking_no)
+                
+                if extract_result:
+                    temp_pdf_path, page_count = extract_result
+                    self._add_log(f"[REPRINT-MANUAL] 주문서 {page_count}장 추출 완료: {tracking_no}")
+                    
+                    if a4_printer:
+                        success = print_pdf_with_printer(str(temp_pdf_path), a4_printer)
+                    else:
+                        success = print_pdf_with_printer(str(temp_pdf_path), None)
+                    
                     if success:
-                        self._add_log(f"[REPRINT-MANUAL] 주문서 출력 성공: {tracking_no} → {a4_printer}")
+                        printer_display = a4_printer if a4_printer else "기본 프린터"
+                        self._add_log(f"[REPRINT-MANUAL] 주문서 출력 성공: {tracking_no} ({page_count}장) → {printer_display}")
                         success_count += 1
                     else:
                         self._add_log(f"[REPRINT-MANUAL] 주문서 출력 실패: {tracking_no}")
                         fail_count += 1
+                    
+                    # 임시 파일 삭제 (keep_temp_files 설정 확인)
+                    if not self.pdf_printer.keep_temp_files and temp_pdf_path.exists():
+                        try:
+                            temp_pdf_path.unlink()
+                        except:
+                            pass
                 else:
-                    # 프린터가 설정되지 않았으면 기본 프린터 사용
-                    success = print_pdf_with_printer(str(order_path), None)
+                    # 추출 실패 시 원본 파일 직접 출력
+                    if a4_printer:
+                        success = print_pdf_with_printer(str(order_path), a4_printer)
+                    else:
+                        success = print_pdf_with_printer(str(order_path), None)
+                    
                     if success:
-                        self._add_log(f"[REPRINT-MANUAL] 주문서 출력 성공: {tracking_no} (기본 프린터)")
+                        printer_display = a4_printer if a4_printer else "기본 프린터"
+                        self._add_log(f"[REPRINT-MANUAL] 주문서 출력 성공: {tracking_no} (원본 파일) → {printer_display}")
                         success_count += 1
                     else:
                         self._add_log(f"[REPRINT-MANUAL] 주문서 출력 실패: {tracking_no}")
                         fail_count += 1
             else:
-                self._add_log(f"[REPRINT-MANUAL] 주문서 PDF 파일 없음: {order_path}")
+                self._add_log(f"[REPRINT-MANUAL] 주문서 PDF 파일 없음: {tracking_no}")
                 fail_count += 1
         
         # 최종 로그
@@ -542,47 +691,6 @@ class MainWindow(QMainWindow):
         
         layout.addSpacing(15)
         
-        # 프린터 설정 그룹
-        printer_group = QGroupBox("프린터 설정")
-        printer_layout = QHBoxLayout(printer_group)
-        printer_layout.setSpacing(5)
-        
-        # 라벨 프린터 선택
-        printer_layout.addWidget(QLabel("라벨 프린터:"))
-        self.label_printer_combo = QComboBox()
-        self.label_printer_combo.setMaximumWidth(150)
-        self.label_printer_combo.setToolTip("송장(라벨)을 출력할 프린터를 선택하세요")
-        printer_layout.addWidget(self.label_printer_combo)
-        
-        # 라벨 테스트 출력 버튼
-        self.label_test_btn = QPushButton("테스트")
-        self.label_test_btn.setMaximumWidth(60)
-        self.label_test_btn.setToolTip("라벨 프린터 테스트 출력")
-        self.label_test_btn.clicked.connect(self._on_test_label_printer)
-        printer_layout.addWidget(self.label_test_btn)
-        
-        printer_layout.addSpacing(10)
-        
-        # A4 프린터 선택
-        printer_layout.addWidget(QLabel("A4 프린터:"))
-        self.a4_printer_combo = QComboBox()
-        self.a4_printer_combo.setMaximumWidth(150)
-        self.a4_printer_combo.setToolTip("주문서(A4)를 출력할 프린터를 선택하세요")
-        printer_layout.addWidget(self.a4_printer_combo)
-        
-        # A4 테스트 출력 버튼
-        self.a4_test_btn = QPushButton("테스트")
-        self.a4_test_btn.setMaximumWidth(60)
-        self.a4_test_btn.setToolTip("A4 프린터 테스트 출력")
-        self.a4_test_btn.clicked.connect(self._on_test_a4_printer)
-        printer_layout.addWidget(self.a4_test_btn)
-        
-        printer_layout.addStretch()
-        
-        layout.addWidget(printer_group)
-        
-        layout.addSpacing(15)
-        
         # 스캐너 시작/중지 버튼 제거 (자동 시작으로 변경)
         # self.scanner_btn = QPushButton("스캐너 시작")
         # self.scanner_btn.setCheckable(True)
@@ -638,15 +746,6 @@ class MainWindow(QMainWindow):
         self.pdf_browse_2_btn.setEnabled(False)
         self.pdf_browse_2_btn.clicked.connect(self._on_browse_pdf_file_2)
         layout.addWidget(self.pdf_browse_2_btn)
-        
-        # 주문서 프린터 선택
-        self.printer_2_combo = QComboBox()
-        self.printer_2_combo.setMaximumWidth(150)
-        self.printer_2_combo.setEnabled(False)
-        self.printer_2_combo.setToolTip("주문서를 출력할 프린터를 선택하세요")
-        self._load_printer_list()
-        layout.addWidget(QLabel("프린터:"))
-        layout.addWidget(self.printer_2_combo)
         
         # 오른쪽 여백 (창 최대화 시 벌어짐 방지)
         layout.addStretch()
@@ -938,6 +1037,37 @@ class MainWindow(QMainWindow):
         clear_log_btn = QPushButton("로그 지우기")
         clear_log_btn.clicked.connect(lambda: self.log_text.clear())
         btn_layout.addWidget(clear_log_btn)
+        
+        # 프린터 설정 그룹 (로그 지우기 옆에 배치)
+        btn_layout.addSpacing(10)
+        btn_layout.addWidget(QLabel("라벨 프린터:"))
+        self.label_printer_combo = QComboBox()
+        self.label_printer_combo.setMaximumWidth(150)
+        self.label_printer_combo.setToolTip("송장(라벨)을 출력할 프린터를 선택하세요")
+        btn_layout.addWidget(self.label_printer_combo)
+        
+        # 라벨 테스트 출력 버튼
+        self.label_test_btn = QPushButton("테스트")
+        self.label_test_btn.setMaximumWidth(60)
+        self.label_test_btn.setToolTip("라벨 프린터 테스트 출력")
+        self.label_test_btn.clicked.connect(self._on_test_label_printer)
+        btn_layout.addWidget(self.label_test_btn)
+        
+        btn_layout.addSpacing(10)
+        
+        # A4 프린터 선택
+        btn_layout.addWidget(QLabel("A4 프린터:"))
+        self.a4_printer_combo = QComboBox()
+        self.a4_printer_combo.setMaximumWidth(150)
+        self.a4_printer_combo.setToolTip("주문서(A4)를 출력할 프린터를 선택하세요")
+        btn_layout.addWidget(self.a4_printer_combo)
+        
+        # A4 테스트 출력 버튼
+        self.a4_test_btn = QPushButton("테스트")
+        self.a4_test_btn.setMaximumWidth(60)
+        self.a4_test_btn.setToolTip("A4 프린터 테스트 출력")
+        self.a4_test_btn.clicked.connect(self._on_test_a4_printer)
+        btn_layout.addWidget(self.a4_test_btn)
         
         btn_layout.addStretch()
         
@@ -1472,6 +1602,30 @@ class MainWindow(QMainWindow):
             self._add_log(f"저장 위치 설정: {file_path}")
     
     @Slot()
+    def _on_browse_label_folder(self):
+        """송장 검색 폴더 선택"""
+        folder_path = QFileDialog.getExistingDirectory(
+            self,
+            "송장 검색 폴더 선택",
+            self.reprint_label_folder_edit.text() or "labels"
+        )
+        if folder_path:
+            self.reprint_label_folder_edit.setText(folder_path)
+            self._add_log(f"[REPRINT] 송장 검색 폴더 설정: {folder_path}")
+    
+    @Slot()
+    def _on_browse_order_folder(self):
+        """주문서 검색 폴더 선택"""
+        folder_path = QFileDialog.getExistingDirectory(
+            self,
+            "주문서 검색 폴더 선택",
+            self.reprint_order_folder_edit.text() or "orders"
+        )
+        if folder_path:
+            self.reprint_order_folder_edit.setText(folder_path)
+            self._add_log(f"[REPRINT] 주문서 검색 폴더 설정: {folder_path}")
+    
+    @Slot()
     def _on_toggle_scanner(self):
         """스캐너 시작/중지 (현재 사용 안 함 - 자동 시작으로 변경됨)"""
         # 스캐너는 프로그램 시작 시 자동으로 시작됨
@@ -1497,9 +1651,9 @@ class MainWindow(QMainWindow):
     
     @Slot(bool)
     def _on_toggle_pdf_keep_temp(self, checked: bool):
-        """PDF 임시 파일 보관 옵션"""
+        """PDF 임시 파일 보관 옵션 (송장/주문서 모두 적용)"""
         self.pdf_printer.keep_temp_files = checked
-        self._add_log(f"PDF 임시 파일: {'보관' if checked else '출력 후 삭제'}")
+        self._add_log(f"PDF 임시 파일: {'보관' if checked else '출력 후 삭제'} (송장/주문서 모두 적용)")
     
     @Slot(bool)
     def _on_toggle_order_sheet(self, checked: bool):
@@ -1509,12 +1663,10 @@ class MainWindow(QMainWindow):
         # UI 요소 활성화/비활성화
         self.pdf_path_2_edit.setEnabled(checked)
         self.pdf_browse_2_btn.setEnabled(checked)
-        self.printer_2_combo.setEnabled(checked)
         
         if checked:
-            # 활성화 시 두 번째 PDF 파일과 프린터 설정
+            # 활성화 시 두 번째 PDF 파일 설정
             pdf_path_2 = self.pdf_path_2_edit.text().strip()
-            printer_name_2 = self.printer_2_combo.currentText()
             
             if pdf_path_2:
                 self.pdf_printer.set_pdf_file_2(pdf_path_2)
@@ -1523,10 +1675,12 @@ class MainWindow(QMainWindow):
                     tracking_numbers = self.excel_loader.get_all_tracking_numbers()
                     self.pdf_printer.build_tracking_index(tracking_numbers)
             
-            if printer_name_2:
-                self.pdf_printer.set_printer_2(printer_name_2)
+            # A4 프린터 설정 사용 (printer_2_combo 제거됨)
+            a4_printer = self.a4_printer_combo.currentText()
+            if a4_printer and a4_printer != "프린터 없음":
+                self.pdf_printer.set_printer_2(a4_printer)
             
-            self._add_log("주문서 출력 활성화됨")
+            self._add_log("주문서 출력 활성화됨 (A4 프린터 설정 사용)")
         else:
             # 비활성화 시 설정 초기화
             self.pdf_printer.set_pdf_file_2("")
@@ -1551,7 +1705,12 @@ class MainWindow(QMainWindow):
                 tracking_numbers = self.excel_loader.get_all_tracking_numbers()
                 self.pdf_printer.build_tracking_index(tracking_numbers)
             
-            self._add_log(f"주문서 PDF 파일 설정: {file_path}")
+            # A4 프린터 설정 사용
+            a4_printer = self.a4_printer_combo.currentText()
+            if a4_printer and a4_printer != "프린터 없음":
+                self.pdf_printer.set_printer_2(a4_printer)
+            
+            self._add_log(f"주문서 PDF 파일 설정: {file_path} (A4 프린터 설정 사용)")
     
     def _load_printer_list(self):
         """시스템 프린터 목록 로드"""
@@ -1577,7 +1736,7 @@ class MainWindow(QMainWindow):
             # 프린터 선택 시 이벤트 연결
             self.a4_printer_combo.currentTextChanged.connect(self._on_a4_printer_changed)
         
-        # 기존 호환성 유지 (printer_1_combo, printer_2_combo)
+        # 기존 호환성 유지 (printer_1_combo)
         if hasattr(self, 'printer_1_combo'):
             self.printer_1_combo.clear()
             if printers:
@@ -1586,13 +1745,6 @@ class MainWindow(QMainWindow):
                 self.printer_1_combo.addItem("프린터 없음")
             self.printer_1_combo.currentTextChanged.connect(self._on_printer_1_changed)
         
-        if hasattr(self, 'printer_2_combo'):
-            self.printer_2_combo.clear()
-            if printers:
-                self.printer_2_combo.addItems(printers)
-            else:
-                self.printer_2_combo.addItem("프린터 없음")
-            self.printer_2_combo.currentTextChanged.connect(self._on_printer_2_changed)
     
     def _load_printer_settings_to_ui(self):
         """settings.json에서 프린터 설정 로드하여 UI에 반영"""
@@ -1637,9 +1789,10 @@ class MainWindow(QMainWindow):
         if printer_name and printer_name != "프린터 없음":
             # settings.json에 저장
             save_printer_settings(a4_printer=printer_name)
-            # 기존 호환성 유지
-            if hasattr(self.pdf_printer, 'set_printer_2'):
-                self.pdf_printer.set_printer_2(printer_name)
+            # 주문서 출력이 활성화되어 있으면 프린터 설정 업데이트
+            if hasattr(self, 'order_sheet_check') and self.order_sheet_check.isChecked():
+                if hasattr(self.pdf_printer, 'set_printer_2'):
+                    self.pdf_printer.set_printer_2(printer_name)
             self._add_log(f"A4 프린터 설정: {printer_name}")
     
     @Slot()
@@ -1712,13 +1865,6 @@ class MainWindow(QMainWindow):
                 self.pdf_printer.set_printer_1(printer_name)
             self._add_log(f"송장 프린터 설정: {printer_name}")
     
-    @Slot(str)
-    def _on_printer_2_changed(self, printer_name: str):
-        """두 번째 프린터 선택 변경 (기존 호환성 유지)"""
-        if printer_name and printer_name != "프린터 없음":
-            if hasattr(self.pdf_printer, 'set_printer_2'):
-                self.pdf_printer.set_printer_2(printer_name)
-            self._add_log(f"주문서 프린터 설정: {printer_name}")
     
     @Slot()
     def _on_priority_changed(self):
