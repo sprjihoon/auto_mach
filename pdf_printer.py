@@ -475,56 +475,91 @@ class PDFPrinter(QObject):
             except Exception:
                 pass
             
-            # ⚠️ 중요: 정확한 페이지만 추출 (2장 송장 로직 비활성화)
-            # 매핑된 페이지 그대로 사용 (다른 송장 페이지 추출 방지)
+            # 2장 송장 처리: 다음 페이지 확인
             start_page = page_num
             end_page = page_num
             
-            self.print_success.emit(f"⚠️ 추출할 페이지 확정: {start_page + 1}번 페이지만 (2장 송장 로직 비활성화)")
+            # 다음 페이지가 있고, 현재 페이지에서 수령자 이름을 찾았거나 제품 정보가 많은 경우
+            if page_num + 1 < total_pages:
+                next_page = doc[page_num + 1]
+                next_text = next_page.get_text() or ""
+                
+                # 다음 페이지에 다른 송장번호가 있는지 확인
+                # 송장번호 패턴: 5-4-4 형식 또는 11-13자리 연속 숫자
+                next_tracking_patterns = [
+                    r'\d{5}[-–—\s]+\d{4}[-–—\s]+\d{4}',  # 5-4-4 형식
+                    r'\b\d{13}\b',  # 13자리
+                    r'\b\d{12}\b',  # 12자리
+                    r'\b\d{11}\b',  # 11자리
+                ]
+                
+                next_has_tracking = False
+                for pattern in next_tracking_patterns:
+                    matches = re.findall(pattern, next_text)
+                    for match in matches:
+                        clean_match = re.sub(r'[-–—\s]', '', match)
+                        if clean_match.isdigit() and len(clean_match) >= 10:
+                            # 다른 송장번호가 있으면 중단
+                            if clean_match != clean_tracking_no:
+                                next_has_tracking = True
+                                break
+                    if next_has_tracking:
+                        break
+                
+                # 다음 페이지에 송장번호가 없고, 고객 정보나 제품 정보가 있으면 포함
+                if not next_has_tracking:
+                    # 다음 페이지에 고객 이름, 제품명, 수량 등의 키워드가 있는지 확인
+                    has_customer_info = any(keyword in next_text for keyword in [
+                        '수령자', '받는분', '수신인', '고객', '주문자',
+                        '상품명', '제품명', '품목', '수량', '개'
+                    ])
+                    
+                    # 또는 현재 페이지에서 수령자 이름을 찾았고, 다음 페이지에 내용이 있으면 포함
+                    if has_customer_info or (recipient_name and len(next_text.strip()) > 20):
+                        end_page = page_num + 1
+                        self.print_success.emit(f"✓ 2장 송장 감지: 다음 페이지({page_num + 2})도 함께 출력")
             
-            # ⚠️ 2장 송장 처리 로직 임시 비활성화 (정확도 우선)
-            # 현재 매핑된 페이지만 정확히 추출
-            self.print_success.emit(f"📄 단일 페이지 추출: {tracking_no} (페이지 {start_page + 1}만 인쇄)")
-            
-            # TODO: 2장 송장 처리가 필요하면 나중에 다시 활성화
-            # 지금은 정확한 페이지 매핑이 우선
+            # 추출할 페이지 범위 확정
+            if start_page == end_page:
+                self.print_success.emit(f"📄 단일 페이지 추출: {tracking_no} (페이지 {start_page + 1}만 인쇄)")
+            else:
+                self.print_success.emit(f"📄 2장 송장 추출: {tracking_no} (페이지 {start_page + 1}~{end_page + 1})")
             
             # 추출된 페이지 수 확인
             extracted_pages = end_page - start_page + 1
             self.print_success.emit(f"PDF 페이지 추출: {tracking_no} (페이지 {start_page + 1}부터 {end_page + 1}까지, 총 {extracted_pages}장)")
             
-            # 라벨 크기 정보 (참고용)
-            label_width_pt = 107 / 25.4 * 72
-            label_height_pt = 168 / 25.4 * 72
-            
             optimized_doc = fitz.open()
-            page = doc[start_page]
-            original_rect = page.rect
             
-            # 내용 영역 추출 (텍스트 블록 기준)
-            clip_rect = self._detect_content_rect(page)
-            self.print_success.emit(f"클립 영역: {clip_rect}")
-            
-            # 원본 페이지의 회전 정보 확인
-            original_rotation = page.rotation  # 0, 90, 180, 270
-            
-            # 고해상도 렌더링
-            dpi = 300
-            zoom = dpi / 72
-            mat = fitz.Matrix(zoom, zoom)
-            pix = page.get_pixmap(matrix=mat, clip=clip_rect, alpha=False)
-            
-            # 새 페이지 생성 (원본 크기 및 방향 유지)
-            # 회전이 90도 또는 270도면 가로/세로 교체
-            if original_rotation in [90, 270]:
-                new_page = optimized_doc.new_page(width=original_rect.height, height=original_rect.width)
-            else:
-                new_page = optimized_doc.new_page(width=original_rect.width, height=original_rect.height)
-            
-            # 이미지를 삽입 (원본 방향 유지, 회전 없음)
-            target_rect = fitz.Rect(0, 0, new_page.rect.width, new_page.rect.height)
-            # rotate=0으로 변경하여 원본 방향 유지
-            new_page.insert_image(target_rect, pixmap=pix, rotate=0, keep_proportion=True, overlay=True)
+            # 모든 페이지를 순회하며 추출
+            for page_idx in range(start_page, end_page + 1):
+                page = doc[page_idx]
+                original_rect = page.rect
+                
+                # 내용 영역 추출 (텍스트 블록 기준)
+                clip_rect = self._detect_content_rect(page)
+                if page_idx == start_page:
+                    self.print_success.emit(f"클립 영역 (페이지 {page_idx + 1}): {clip_rect}")
+                
+                # 원본 페이지의 회전 정보 확인
+                original_rotation = page.rotation  # 0, 90, 180, 270
+                
+                # 고해상도 렌더링
+                dpi = 300
+                zoom = dpi / 72
+                mat = fitz.Matrix(zoom, zoom)
+                pix = page.get_pixmap(matrix=mat, clip=clip_rect, alpha=False)
+                
+                # 새 페이지 생성 (원본 크기 및 방향 유지)
+                # 회전이 90도 또는 270도면 가로/세로 교체
+                if original_rotation in [90, 270]:
+                    new_page = optimized_doc.new_page(width=original_rect.height, height=original_rect.width)
+                else:
+                    new_page = optimized_doc.new_page(width=original_rect.width, height=original_rect.height)
+                
+                # 이미지를 삽입 (원본 방향 유지, 회전 없음)
+                target_rect = fitz.Rect(0, 0, new_page.rect.width, new_page.rect.height)
+                new_page.insert_image(target_rect, pixmap=pix, rotate=0, keep_proportion=True, overlay=True)
             
             temp_path = self._temp_dir / f"{clean_tracking_no}.pdf"
             if temp_path.exists():
@@ -534,7 +569,8 @@ class PDFPrinter(QObject):
             optimized_doc.close()
             doc.close()
             
-            self.print_success.emit(f"✅ 라벨 PDF 생성 완료: {temp_path.name} (원본 방향 유지, 회전: {original_rotation}도)")
+            pages_info = f"{extracted_pages}장" if extracted_pages > 1 else "1장"
+            self.print_success.emit(f"✅ 라벨 PDF 생성 완료: {temp_path.name} ({pages_info}, 원본 방향 유지)")
             return temp_path
             
         except Exception as e:
