@@ -113,36 +113,107 @@ class PDFPrinter(QObject):
                             # 표준 텍스트 추출
                             text = page.extract_text() or ""
                             
-                            # 고정밀 텍스트 추출 옵션 시도
+                            # 고정밀 텍스트 추출 옵션 여러 방법 시도
                             if not text or len(text.strip()) < 10:
-                                text = page.extract_text(
-                                    x_tolerance=3,      # 문자 간격 허용 오차
-                                    y_tolerance=3,      # 줄 간격 허용 오차
-                                    layout=True,        # 레이아웃 유지
-                                    x_density=7.25,     # 수평 해상도
-                                    y_density=7.25      # 수직 해상도
-                                ) or ""
+                                extraction_methods = [
+                                    # 방법 1: 고정밀 옵션
+                                    {"x_tolerance": 1, "y_tolerance": 1, "layout": True},
+                                    {"x_tolerance": 3, "y_tolerance": 3, "layout": True},
+                                    {"x_tolerance": 5, "y_tolerance": 5, "layout": False},
+                                    # 방법 2: 다른 설정들
+                                    {"x_tolerance": 2, "y_tolerance": 2, "layout": True, "x_density": 10, "y_density": 10},
+                                    {"use_text_flow": True, "layout": True},
+                                ]
+                                
+                                for method in extraction_methods:
+                                    try:
+                                        text = page.extract_text(**method) or ""
+                                        if text and len(text.strip()) >= 10:
+                                            break
+                                    except:
+                                        continue
                             
                             if text and len(text.strip()) > 0:
                                 text_extracted = True
                                 found_matches = set()
                                 
-                                # 디버깅: 추출된 텍스트 확인 (처음 200자)
-                                text_sample = text.replace('\n', ' ').replace('\r', ' ')[:200]
+                                # 디버깅: 추출된 텍스트 확인 (처음 300자)
+                                text_sample = text.replace('\n', ' ').replace('\r', ' ')[:300]
                                 self.print_success.emit(f"[페이지 {page_num + 1}] 텍스트 추출 성공: {text_sample}...")
                                 
-                                # 텍스트 정규화 (노이즈 제거)
+                                # 원본 텍스트에서 먼저 하이픈 포함 패턴 찾기
                                 original_text = text
-                                text = re.sub(r'[^\w\s\-–—]', ' ', text)  # 특수문자 제거
-                                text = re.sub(r'\s+', ' ', text)         # 다중 공백 제거
                                 
-                                # 디버깅: 모든 숫자 패턴 찾기
-                                all_numbers = re.findall(r'\d+', text)
-                                if all_numbers:
-                                    self.print_success.emit(f"[페이지 {page_num + 1}] 발견된 숫자: {', '.join(all_numbers[:10])}" + ("..." if len(all_numbers) > 10 else ""))
+                                # 디버깅: 하이픈 포함 숫자 패턴 찾기  
+                                hyphen_patterns = re.findall(r'\d{5}[-–—\s]\d{4}[-–—\s]\d{4}', original_text)
+                                if hyphen_patterns:
+                                    self.print_success.emit(f"[페이지 {page_num + 1}] 하이픈 포함 패턴: {', '.join(hyphen_patterns)}")
                                 
+                                # 디버깅: 연속 숫자 패턴 찾기
+                                continuous_numbers = re.findall(r'\d{10,15}', original_text)
+                                if continuous_numbers:
+                                    self.print_success.emit(f"[페이지 {page_num + 1}] 연속 숫자: {', '.join(continuous_numbers[:5])}")
+                                
+                                # 원본 텍스트에서 직접 패턴 매칭 (정규화 전)
                                 for pattern in patterns:
-                                    matches = re.findall(pattern, text)
+                                    matches = re.findall(pattern, original_text)
+                                    if matches:
+                                        self.print_success.emit(f"[페이지 {page_num + 1}] 패턴 매칭 성공: {matches}")
+                                    
+                                    for match in matches:
+                                        # 모든 하이픈 변형과 공백 제거
+                                        clean_match = re.sub(r'[-–—\s]', '', match)
+                                        
+                                        # 숫자만 남았는지 확인 (최소 10자리)
+                                        if clean_match.isdigit() and len(clean_match) >= 10:
+                                            # 이미 처리한 매치는 건너뛰기
+                                            if clean_match in found_matches:
+                                                continue
+                                            found_matches.add(clean_match)
+                                            
+                                            # 디버깅: 송장번호 매칭 성공
+                                            self.print_success.emit(f"✓ 송장번호 발견: {match} → {clean_match} (페이지 {page_num + 1})")
+                                            
+                                            # 하이픈 제거한 버전 저장 (주요 인덱스)
+                                            if clean_match not in self._tracking_index:
+                                                self._tracking_index[clean_match] = (pdf_path, page_num)
+                                                total_pages += 1
+                                            
+                                            # 원본 형식도 저장 (하이픈 포함)
+                                            if match != clean_match and match not in self._tracking_index:
+                                                self._tracking_index[match] = (pdf_path, page_num)
+                                
+                                # 추가로 정규화된 텍스트에서도 시도 (원본에서 못 찾은 경우)
+                                if not found_matches:
+                                    text = re.sub(r'[^\w\s\-–—]', ' ', original_text)  # 특수문자 제거
+                                    text = re.sub(r'\s+', ' ', text)         # 다중 공백 제거
+                                    
+                                    self.print_success.emit(f"[페이지 {page_num + 1}] 정규화된 텍스트에서 재시도...")
+                                    
+                                    for pattern in patterns:
+                                        matches = re.findall(pattern, text)
+                                        for match in matches:
+                                            # 모든 하이픈 변형과 공백 제거
+                                            clean_match = re.sub(r'[-–—\s]', '', match)
+                                            
+                                            # 숫자만 남았는지 확인 (최소 10자리)
+                                            if clean_match.isdigit() and len(clean_match) >= 10:
+                                                # 이미 처리한 매치는 건너뛰기
+                                                if clean_match in found_matches:
+                                                    continue
+                                                found_matches.add(clean_match)
+                                                
+                                                # 디버깅: 송장번호 매칭 성공
+                                                self.print_success.emit(f"✓ 송장번호 발견 (정규화 후): {match} → {clean_match} (페이지 {page_num + 1})")
+                                                
+                                                # 하이픈 제거한 버전 저장 (주요 인덱스)
+                                                if clean_match not in self._tracking_index:
+                                                    self._tracking_index[clean_match] = (pdf_path, page_num)
+                                                    total_pages += 1
+                                                
+                                                # 원본 형식도 저장 (하이픈 포함)
+                                                if match != clean_match and match not in self._tracking_index:
+                                                    self._tracking_index[match] = (pdf_path, page_num)
                                     for match in matches:
                                         # 모든 하이픈 변형과 공백 제거
                                         clean_match = re.sub(r'[-–—\s]', '', match)
@@ -237,37 +308,40 @@ class PDFPrinter(QObject):
                                                 if match != clean_match and match not in self._tracking_index:
                                                     self._tracking_index[match] = (pdf_path, page_num)
                         
-                        # PyMuPDF로도 텍스트 추출 실패 시 엑셀 기반 매핑 시도
+                        # 텍스트 추출 실패 시 엑셀 기반 매핑 시도 (최후 수단)
                         if not pymupdf_extracted:
                             if excel_tracking_numbers and len(excel_tracking_numbers) > 0:
                                 page_count = len(doc)
+                                self.print_error.emit(f"⚠️ PDF 텍스트 추출 실패 ({pdf_path.name}): 엑셀 기반 순서 매핑으로 대체")
                                 
-                                # 엑셀의 송장번호를 PDF 페이지 순서대로 매핑
+                                # 전체 엑셀 송장번호 목록 표시
+                                all_numbers = [str(no).strip() for no in excel_tracking_numbers]
+                                self.print_success.emit(f"📋 전체 엑셀 송장번호 ({len(all_numbers)}개): {', '.join(all_numbers)}")
+                                
+                                # 엑셀 순서 = PDF 페이지 순서로 매핑 (임시 방안)
                                 mapping_details = []
                                 for idx, tracking_no in enumerate(excel_tracking_numbers):
                                     if idx < page_count:
                                         tracking_no_str = str(tracking_no).strip()
-                                        # 하이픈 제거한 버전
                                         clean_tracking_no = re.sub(r'[-–—\s]', '', tracking_no_str)
                                         
-                                        # 인덱스에 추가 (중복 방지)
                                         if clean_tracking_no not in self._tracking_index:
                                             self._tracking_index[clean_tracking_no] = (pdf_path, idx)
                                             total_pages += 1
-                                            mapping_details.append(f"페이지 {idx + 1}: {tracking_no_str} → {clean_tracking_no}")
+                                            mapping_details.append(f"엑셀{idx + 1}번→PDF페이지{idx + 1}: {tracking_no_str}")
                                         
-                                        # 원본 형식도 저장 (하이픈 포함)
                                         if tracking_no_str != clean_tracking_no and tracking_no_str not in self._tracking_index:
                                             self._tracking_index[tracking_no_str] = (pdf_path, idx)
                                 
                                 if total_pages > 0:
-                                    self.print_success.emit(f"엑셀 송장번호로 PDF 매핑 완료: {total_pages}개 (알PDF 이미지 기반)")
-                                    # 매핑 상세 로그 (처음 5개만)
+                                    self.print_success.emit(f"📋 엑셀 기반 매핑 완료: {total_pages}개")
                                     if mapping_details:
-                                        details_sample = mapping_details[:5]
-                                        self.print_success.emit(f"매핑 상세: {', '.join(details_sample)}" + ("..." if len(mapping_details) > 5 else ""))
+                                        for detail in mapping_details:  # 전체 매핑 상세 표시
+                                            self.print_success.emit(f"  • {detail}")
+                                    self.print_success.emit(f"⚠️ 주의: 엑셀 순서와 실제 PDF 페이지 순서가 다를 수 있습니다!")
                             else:
-                                self.print_error.emit(f"PDF 텍스트 추출 실패 ({pdf_path.name}): 알PDF로 저장된 이미지 PDF입니다. 엑셀 파일을 먼저 로드하면 자동 매핑됩니다.")
+                                self.print_error.emit(f"⚠️ PDF 텍스트 추출 실패 ({pdf_path.name}): 송장번호를 읽을 수 없습니다.")
+                                self.print_error.emit(f"해결 방법: 엑셀 파일을 먼저 로드하거나 PDF를 텍스트 형태로 저장하세요")
                         
                         doc.close()
                     except Exception as e:
@@ -278,24 +352,37 @@ class PDFPrinter(QObject):
                                 page_count = len(doc)
                                 doc.close()
                                 
-                                # 엑셀의 송장번호를 PDF 페이지 순서대로 매핑
+                                self.print_error.emit(f"PDF 처리 예외 발생 ({pdf_path.name}): {str(e)}")
+                                self.print_success.emit(f"📋 엑셀 기반 매핑으로 대체 시도")
+                                
+                                # 전체 엑셀 송장번호 목록 표시
+                                all_numbers = [str(no).strip() for no in excel_tracking_numbers]
+                                self.print_success.emit(f"📋 전체 엑셀 송장번호 ({len(all_numbers)}개): {', '.join(all_numbers)}")
+                                
+                                mapping_details = []
                                 for idx, tracking_no in enumerate(excel_tracking_numbers):
                                     if idx < page_count:
-                                        # 하이픈 제거한 버전
-                                        clean_tracking_no = re.sub(r'[-–—\s]', '', str(tracking_no))
+                                        tracking_no_str = str(tracking_no).strip()
+                                        clean_tracking_no = re.sub(r'[-–—\s]', '', tracking_no_str)
+                                        
                                         if clean_tracking_no not in self._tracking_index:
                                             self._tracking_index[clean_tracking_no] = (pdf_path, idx)
                                             total_pages += 1
-                                        # 원본 형식도 저장
-                                        if str(tracking_no) not in self._tracking_index:
-                                            self._tracking_index[str(tracking_no)] = (pdf_path, idx)
+                                            mapping_details.append(f"엑셀{idx + 1}번→PDF페이지{idx + 1}: {tracking_no_str}")
+                                        
+                                        if tracking_no_str != clean_tracking_no and tracking_no_str not in self._tracking_index:
+                                            self._tracking_index[tracking_no_str] = (pdf_path, idx)
                                 
                                 if total_pages > 0:
-                                    self.print_success.emit(f"엑셀 송장번호로 PDF 매핑 완료: {total_pages}개 (알PDF 이미지 기반)")
+                                    self.print_success.emit(f"📋 엑셀 기반 매핑 완료: {total_pages}개")
+                                    if mapping_details:
+                                        for detail in mapping_details:  # 전체 매핑 상세 표시
+                                            self.print_success.emit(f"  • {detail}")
                             except Exception as e2:
                                 self.print_error.emit(f"PDF 매핑 실패 ({pdf_path.name}): {str(e2)}")
                         else:
-                            self.print_error.emit(f"PDF 텍스트 추출 실패 ({pdf_path.name}): 알PDF로 저장된 이미지 PDF입니다. 엑셀 파일을 먼저 로드하면 자동 매핑됩니다.")
+                            self.print_error.emit(f"PDF 처리 실패 ({pdf_path.name}): {str(e)}")
+                            self.print_error.emit(f"해결 방법: 엑셀 파일을 먼저 로드하거나 PDF를 텍스트 형태로 저장하세요")
                         
             except Exception as e:
                 self.print_error.emit(f"PDF 스캔 오류 ({pdf_path.name}): {str(e)}")
@@ -314,9 +401,11 @@ class PDFPrinter(QObject):
         다음 페이지에 수령자 이름만 있고 송장번호가 없으면 함께 추출 (2장 송장 처리)
         """
         if tracking_no not in self._tracking_index:
+            self.print_error.emit(f"인덱스에 없는 송장번호: {tracking_no}")
             return None
         
         pdf_path, page_num = self._tracking_index[tracking_no]
+        self.print_success.emit(f"페이지 추출 시작: {tracking_no} → {pdf_path.name} 페이지 {page_num + 1}")
         
         try:
             import re
@@ -447,6 +536,16 @@ class PDFPrinter(QObject):
         self.print_success.emit(f"인덱스 확인: 검색 대상 {tracking_no} (정규화: {clean_tracking_no}), 인덱스에 {len(self._tracking_index)}개 송장번호 존재")
         if indexed_tracking_nos:
             self.print_success.emit(f"인덱스 샘플: {', '.join(map(str, indexed_tracking_nos))}")
+        
+        # 디버깅: 전체 인덱스 매핑 상태 확인 (송장번호 → 페이지)
+        mapping_info = []
+        for key, (pdf_file, page_num) in self._tracking_index.items():
+            if len(key) >= 10:  # 송장번호만 (너무 짧은 키 제외)
+                mapping_info.append(f"{key}→페이지{page_num + 1}")
+        
+        if mapping_info:
+            sample_mappings = mapping_info[:8]  # 처음 8개만
+            self.print_success.emit(f"송장→페이지 매핑: {', '.join(sample_mappings)}" + ("..." if len(mapping_info) > 8 else ""))
         
         search_keys = [clean_tracking_no, tracking_no]
         matched_key = None
