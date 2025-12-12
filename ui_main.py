@@ -2,6 +2,7 @@
 PySide6 UI 화면
 """
 import sys
+import os
 from pathlib import Path
 from typing import Optional
 from PySide6.QtWidgets import (
@@ -628,10 +629,12 @@ class MainWindow(QMainWindow):
             # 자동 인덱싱
             self._add_log("PDF 파일 스캔 중...")
             
-            # 엑셀에서 송장번호 목록 가져오기 (이미지 PDF의 경우 사용)
+            # 엑셀에서 송장번호 목록 가져오기 (이미지 PDF의 경우 순서대로 매핑)
             excel_tracking_numbers = None
             if self.excel_loader.df is not None and 'tracking_no' in self.excel_loader.df.columns:
-                excel_tracking_numbers = self.excel_loader.df['tracking_no'].unique().tolist()
+                # 순서를 보장하기 위해 drop_duplicates 사용 (첫 번째 출현 순서 유지)
+                excel_tracking_numbers = self.excel_loader.df['tracking_no'].drop_duplicates().tolist()
+                self._add_log(f"엑셀 송장번호 순서: {', '.join(map(str, excel_tracking_numbers[:5]))}..." if len(excel_tracking_numbers) > 5 else f"엑셀 송장번호: {', '.join(map(str, excel_tracking_numbers))}")
             
             count = self.pdf_printer.build_tracking_index(excel_tracking_numbers)
             
@@ -659,6 +662,26 @@ class MainWindow(QMainWindow):
             pdf_path = self.pdf_path_edit.text().strip()
             if pdf_path:
                 self.pdf_printer.set_labels_directory(pdf_path)
+            
+            # PDF 파일이 설정되어 있으면 자동으로 다시 스캔 (이미지 PDF 매핑을 위해)
+            pdf_file_path = self.pdf_path_edit.text().strip()
+            if pdf_file_path and os.path.exists(pdf_file_path):
+                self.pdf_printer.set_pdf_file(pdf_file_path)
+                self._add_log("엑셀 로드 후 PDF 재스캔 중...")
+                
+                # 엑셀에서 송장번호 목록 가져오기 (순서 보장)
+                excel_tracking_numbers = None
+                if self.excel_loader.df is not None and 'tracking_no' in self.excel_loader.df.columns:
+                    # 순서를 보장하기 위해 drop_duplicates 사용 (첫 번째 출현 순서 유지)
+                    excel_tracking_numbers = self.excel_loader.df['tracking_no'].drop_duplicates().tolist()
+                    self._add_log(f"엑셀 송장번호 순서: {', '.join(map(str, excel_tracking_numbers[:5]))}..." if len(excel_tracking_numbers) > 5 else f"엑셀 송장번호: {', '.join(map(str, excel_tracking_numbers))}")
+                
+                count = self.pdf_printer.build_tracking_index(excel_tracking_numbers)
+                
+                if count > 0:
+                    self._add_log(f"<b style='color:#4CAF50'>✓ PDF 재스캔 완료: {count}개 송장번호 발견</b>", html=True)
+                else:
+                    self._add_log("[경고] PDF 재스캔 실패: 송장번호를 찾지 못했습니다.")
             
             # 구성 요약 출력
             self._show_load_summary()

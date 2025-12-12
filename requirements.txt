@@ -11,3 +11,7 @@ pywin32>=306
 pygetwindow>=0.0.9
 reportlab>=4.0.0
 
+# PDF 텍스트 추출 라이브러리
+pdfplumber>=0.10.0
+PyMuPDF>=1.23.0
+

@@ -11,7 +11,7 @@ from PySide6.QtCore import QObject, Signal
 
 from utils import get_pdf_path, pdf_exists
 
-# PDF 처리 라이브러리
+# PDF 처리 라이브러리 (고정밀 인식을 위해 여러 라이브러리 사용)
 try:
     import pdfplumber
     import fitz  # PyMuPDF
@@ -79,28 +79,67 @@ class PDFPrinter(QObject):
         for pdf_path in pdf_files:
             try:
                 import re
-                # 다양한 송장번호 패턴 매칭
+                # 다양한 송장번호 패턴 매칭 (정확도 향상)
                 # 하이픈 변형: 일반 하이픈(-), en-dash(–), em-dash(—), 공백 등
                 patterns = [
-                    # 5-4-4 형식 (하이픈 변형 포함)
-                    r'\b(\d{5}[-–—\s]\d{4}[-–—\s]\d{4})\b',  # 60914-8682-2638 형식 (하이픈 변형 지원)
+                    # 5-4-4 형식 (하이픈 변형 포함) - 가장 일반적
+                    r'\b(\d{5}[-–—\s]\d{4}[-–—\s]\d{4})\b',  # 60914-8682-2638 형식
+                    r'(\d{5}[-–—\s]\d{4}[-–—\s]\d{4})',     # 단어 경계 없이
+                    
                     # 5-4-4 형식 (일반 하이픈만)
-                    r'\b(\d{5}-\d{4}-\d{4})\b',  # 60914-8675-3755 형식
-                    # 연속 숫자 형식
-                    r'\b(\d{13})\b',  # 13자리 숫자
-                    r'\b(\d{12})\b',  # 12자리 숫자
-                    r'\b(\d{10,14})\b',  # 10-14자리 숫자
+                    r'\b(\d{5}-\d{4}-\d{4})\b',             # 60914-8675-3755 형식
+                    r'(\d{5}-\d{4}-\d{4})',                 # 단어 경계 없이
+                    
+                    # 연속 숫자 형식 (13자리)
+                    r'\b(609\d{10})\b',                     # 609로 시작하는 13자리
+                    r'(609\d{10})',                         # 단어 경계 없이
+                    r'\b(\d{13})\b',                        # 일반 13자리
+                    
+                    # 연속 숫자 형식 (12자리)
+                    r'\b(\d{12})\b',                        # 12자리 숫자
+                    
+                    # 기타 형식
+                    r'\b(\d{10,15})\b',                     # 10-15자리 숫자 (넓은 범위)
                 ]
                 
-                # 방법 1: pdfplumber로 텍스트 추출 시도
+                # 디버깅: 사용할 패턴 로그
+                self.print_success.emit(f"송장번호 패턴 {len(patterns)}개 사용하여 스캔 시작")
+                
+                # 방법 1: pdfplumber로 고정밀 텍스트 추출
                 text_extracted = False
                 try:
                     with pdfplumber.open(pdf_path) as pdf:
                         for page_num, page in enumerate(pdf.pages):
+                            # 표준 텍스트 추출
                             text = page.extract_text() or ""
+                            
+                            # 고정밀 텍스트 추출 옵션 시도
+                            if not text or len(text.strip()) < 10:
+                                text = page.extract_text(
+                                    x_tolerance=3,      # 문자 간격 허용 오차
+                                    y_tolerance=3,      # 줄 간격 허용 오차
+                                    layout=True,        # 레이아웃 유지
+                                    x_density=7.25,     # 수평 해상도
+                                    y_density=7.25      # 수직 해상도
+                                ) or ""
+                            
                             if text and len(text.strip()) > 0:
                                 text_extracted = True
                                 found_matches = set()
+                                
+                                # 디버깅: 추출된 텍스트 확인 (처음 200자)
+                                text_sample = text.replace('\n', ' ').replace('\r', ' ')[:200]
+                                self.print_success.emit(f"[페이지 {page_num + 1}] 텍스트 추출 성공: {text_sample}...")
+                                
+                                # 텍스트 정규화 (노이즈 제거)
+                                original_text = text
+                                text = re.sub(r'[^\w\s\-–—]', ' ', text)  # 특수문자 제거
+                                text = re.sub(r'\s+', ' ', text)         # 다중 공백 제거
+                                
+                                # 디버깅: 모든 숫자 패턴 찾기
+                                all_numbers = re.findall(r'\d+', text)
+                                if all_numbers:
+                                    self.print_success.emit(f"[페이지 {page_num + 1}] 발견된 숫자: {', '.join(all_numbers[:10])}" + ("..." if len(all_numbers) > 10 else ""))
                                 
                                 for pattern in patterns:
                                     matches = re.findall(pattern, text)
@@ -114,6 +153,9 @@ class PDFPrinter(QObject):
                                             if clean_match in found_matches:
                                                 continue
                                             found_matches.add(clean_match)
+                                            
+                                            # 디버깅: 송장번호 매칭 성공
+                                            self.print_success.emit(f"✓ 송장번호 발견: {match} → {clean_match} (페이지 {page_num + 1})")
                                             
                                             # 하이픈 제거한 버전 저장 (주요 인덱스)
                                             if clean_match not in self._tracking_index:
@@ -124,44 +166,76 @@ class PDFPrinter(QObject):
                                             if match != clean_match and match not in self._tracking_index:
                                                 self._tracking_index[match] = (pdf_path, page_num)
                 except Exception as e:
-                    # pdfplumber 실패 시 PyMuPDF로 시도
+                    # pdfplumber 실패 시 다음 방법으로
                     pass
                 
-                # 방법 2: pdfplumber로 텍스트 추출 실패 시 PyMuPDF로 시도
+                # 방법 2: PyMuPDF로 고정밀 텍스트 추출
                 if not text_extracted:
                     try:
                         doc = fitz.open(pdf_path)
                         pymupdf_extracted = False
                         for page_num in range(len(doc)):
                             page = doc[page_num]
-                            # PyMuPDF로 텍스트 추출 시도
-                            text = page.get_text() or ""
                             
-                            if text and len(text.strip()) > 0:
-                                pymupdf_extracted = True
-                                found_matches = set()
-                                
-                                for pattern in patterns:
-                                    matches = re.findall(pattern, text)
-                                    for match in matches:
-                                        # 모든 하이픈 변형과 공백 제거
-                                        clean_match = re.sub(r'[-–—\s]', '', match)
-                                        
-                                        # 숫자만 남았는지 확인 (최소 10자리)
-                                        if clean_match.isdigit() and len(clean_match) >= 10:
-                                            # 이미 처리한 매치는 건너뛰기
-                                            if clean_match in found_matches:
-                                                continue
-                                            found_matches.add(clean_match)
+                            # 다양한 텍스트 추출 방법 시도
+                            texts_to_try = []
+                            
+                            # 1) 기본 텍스트 추출
+                            text1 = page.get_text() or ""
+                            if text1.strip():
+                                texts_to_try.append(text1)
+                            
+                            # 2) 고정밀 텍스트 추출
+                            try:
+                                text2 = page.get_text("text", clip=None) or ""
+                                if text2.strip() and text2 not in texts_to_try:
+                                    texts_to_try.append(text2)
+                            except:
+                                pass
+                            
+                            # 3) 블록 단위 텍스트 추출
+                            try:
+                                blocks = page.get_text("blocks") or []
+                                block_text = ""
+                                for block in blocks:
+                                    if len(block) >= 5 and isinstance(block[4], str):
+                                        block_text += block[4] + " "
+                                if block_text.strip() and block_text not in texts_to_try:
+                                    texts_to_try.append(block_text)
+                            except:
+                                pass
+                            
+                            # 각 텍스트에서 송장번호 추출
+                            for text in texts_to_try:
+                                if text and len(text.strip()) > 0:
+                                    pymupdf_extracted = True
+                                    found_matches = set()
+                                    
+                                    # 텍스트 정규화
+                                    text = re.sub(r'[^\w\s\-–—]', ' ', text)
+                                    text = re.sub(r'\s+', ' ', text)
+                                    
+                                    for pattern in patterns:
+                                        matches = re.findall(pattern, text)
+                                        for match in matches:
+                                            # 모든 하이픈 변형과 공백 제거
+                                            clean_match = re.sub(r'[-–—\s]', '', match)
                                             
-                                            # 하이픈 제거한 버전 저장 (주요 인덱스)
-                                            if clean_match not in self._tracking_index:
-                                                self._tracking_index[clean_match] = (pdf_path, page_num)
-                                                total_pages += 1
-                                            
-                                            # 원본 형식도 저장 (하이픈 포함)
-                                            if match != clean_match and match not in self._tracking_index:
-                                                self._tracking_index[match] = (pdf_path, page_num)
+                                            # 숫자만 남았는지 확인 (최소 10자리)
+                                            if clean_match.isdigit() and len(clean_match) >= 10:
+                                                # 이미 처리한 매치는 건너뛰기
+                                                if clean_match in found_matches:
+                                                    continue
+                                                found_matches.add(clean_match)
+                                                
+                                                # 하이픈 제거한 버전 저장 (주요 인덱스)
+                                                if clean_match not in self._tracking_index:
+                                                    self._tracking_index[clean_match] = (pdf_path, page_num)
+                                                    total_pages += 1
+                                                
+                                                # 원본 형식도 저장 (하이픈 포함)
+                                                if match != clean_match and match not in self._tracking_index:
+                                                    self._tracking_index[match] = (pdf_path, page_num)
                         
                         # PyMuPDF로도 텍스트 추출 실패 시 엑셀 기반 매핑 시도
                         if not pymupdf_extracted:
@@ -169,19 +243,29 @@ class PDFPrinter(QObject):
                                 page_count = len(doc)
                                 
                                 # 엑셀의 송장번호를 PDF 페이지 순서대로 매핑
+                                mapping_details = []
                                 for idx, tracking_no in enumerate(excel_tracking_numbers):
                                     if idx < page_count:
+                                        tracking_no_str = str(tracking_no).strip()
                                         # 하이픈 제거한 버전
-                                        clean_tracking_no = re.sub(r'[-–—\s]', '', str(tracking_no))
+                                        clean_tracking_no = re.sub(r'[-–—\s]', '', tracking_no_str)
+                                        
+                                        # 인덱스에 추가 (중복 방지)
                                         if clean_tracking_no not in self._tracking_index:
                                             self._tracking_index[clean_tracking_no] = (pdf_path, idx)
                                             total_pages += 1
-                                        # 원본 형식도 저장
-                                        if str(tracking_no) not in self._tracking_index:
-                                            self._tracking_index[str(tracking_no)] = (pdf_path, idx)
+                                            mapping_details.append(f"페이지 {idx + 1}: {tracking_no_str} → {clean_tracking_no}")
+                                        
+                                        # 원본 형식도 저장 (하이픈 포함)
+                                        if tracking_no_str != clean_tracking_no and tracking_no_str not in self._tracking_index:
+                                            self._tracking_index[tracking_no_str] = (pdf_path, idx)
                                 
                                 if total_pages > 0:
                                     self.print_success.emit(f"엑셀 송장번호로 PDF 매핑 완료: {total_pages}개 (알PDF 이미지 기반)")
+                                    # 매핑 상세 로그 (처음 5개만)
+                                    if mapping_details:
+                                        details_sample = mapping_details[:5]
+                                        self.print_success.emit(f"매핑 상세: {', '.join(details_sample)}" + ("..." if len(mapping_details) > 5 else ""))
                             else:
                                 self.print_error.emit(f"PDF 텍스트 추출 실패 ({pdf_path.name}): 알PDF로 저장된 이미지 PDF입니다. 엑셀 파일을 먼저 로드하면 자동 매핑됩니다.")
                         
@@ -274,6 +358,8 @@ class PDFPrinter(QObject):
                 pass
             
             # 인쇄할 페이지 범위 결정
+            # 기본값: 첫 번째 장만 (송장번호가 있는 페이지)
+            start_page = page_num
             end_page = page_num
             
             # 다음 페이지 확인 (2장 송장 처리)
@@ -295,16 +381,27 @@ class PDFPrinter(QObject):
                             has_tracking_no = True
                             break
                     
-                    # 다음 페이지에 송장번호가 없고, 수령자 이름이 있으면 함께 인쇄
+                    # 다음 페이지에 송장번호가 없고, 수령자 이름이 있으면 첫 번째 장과 두 번째 장 함께 인쇄
                     if not has_tracking_no and recipient_name in next_text:
-                        end_page = page_num + 1
-                        self.print_success.emit(f"2장 송장 감지: {tracking_no} (수령자: {recipient_name}, 페이지 {page_num + 1}-{end_page + 1})")
+                        end_page = page_num + 1  # 첫 번째 장 + 두 번째 장 함께
+                        self.print_success.emit(f"2장 송장 감지: {tracking_no} (수령자: {recipient_name}, 페이지 {start_page + 1}과 {end_page + 1} 함께 인쇄)")
+                    else:
+                        # 1장 송장인 경우 첫 번째 장만 인쇄
+                        self.print_success.emit(f"1장 송장: {tracking_no} (페이지 {start_page + 1} 인쇄)")
                 except Exception:
-                    pass
+                    # 오류 발생 시 첫 번째 장만 인쇄
+                    self.print_success.emit(f"페이지 추출: {tracking_no} (페이지 {start_page + 1} 인쇄)")
+            else:
+                # 수령자 이름을 찾지 못한 경우 첫 번째 장만 인쇄
+                self.print_success.emit(f"페이지 추출: {tracking_no} (페이지 {start_page + 1} 인쇄)")
             
             # 새 PDF 생성 (1장 또는 2장)
             new_doc = fitz.open()
-            new_doc.insert_pdf(doc, from_page=page_num, to_page=end_page)
+            new_doc.insert_pdf(doc, from_page=start_page, to_page=end_page)
+            
+            # 추출된 페이지 수 확인
+            extracted_pages = end_page - start_page + 1
+            self.print_success.emit(f"PDF 페이지 추출: {tracking_no} (페이지 {start_page + 1}부터 {end_page + 1}까지, 총 {extracted_pages}장)")
             
             # 임시 파일로 저장 (하이픈 제거 버전 사용)
             temp_path = self._temp_dir / f"{clean_tracking_no}.pdf"
@@ -312,10 +409,6 @@ class PDFPrinter(QObject):
             new_doc.close()
             doc.close()
             
-            if end_page > page_num:
-                self.print_success.emit(f"페이지 추출 완료: {tracking_no} (페이지 {page_num + 1}-{end_page + 1}/{total_pages}, 2장 송장)")
-            else:
-                self.print_success.emit(f"페이지 추출 완료: {tracking_no} (페이지 {page_num + 1}/{total_pages})")
             return temp_path
             
         except Exception as e:
@@ -348,18 +441,31 @@ class PDFPrinter(QObject):
         # 1. 인덱스에서 송장번호 찾기 (원본 PDF 파일과 페이지 번호 확인)
         original_pdf_path = None
         page_num = None
+        
+        # 디버깅: 인덱스에 있는 송장번호 목록 확인
+        indexed_tracking_nos = list(self._tracking_index.keys())[:10]  # 처음 10개만
+        self.print_success.emit(f"인덱스 확인: 검색 대상 {tracking_no} (정규화: {clean_tracking_no}), 인덱스에 {len(self._tracking_index)}개 송장번호 존재")
+        if indexed_tracking_nos:
+            self.print_success.emit(f"인덱스 샘플: {', '.join(map(str, indexed_tracking_nos))}")
+        
         search_keys = [clean_tracking_no, tracking_no]
+        matched_key = None
         for key in search_keys:
             if key in self._tracking_index:
                 original_pdf_path, page_num = self._tracking_index[key]
-                self.print_success.emit(f"PDF 파일에서 송장번호 찾음: {key} (원본: {original_pdf_path.name}, 페이지: {page_num + 1})")
+                matched_key = key
+                self.print_success.emit(f"✓ 송장번호 매칭 성공: '{tracking_no}' → 인덱스 키 '{matched_key}' (원본: {original_pdf_path.name}, 페이지: {page_num + 1})")
                 break
+        
+        if not matched_key:
+            self.print_error.emit(f"✗ 송장번호 매칭 실패: '{tracking_no}' (정규화: '{clean_tracking_no}')를 인덱스에서 찾을 수 없습니다")
         
         # 2. 해당 페이지를 임시 파일로 추출하여 실물 프린터로 인쇄
         if original_pdf_path and page_num is not None:
-            pdf_path = self.extract_page_to_temp(key if key in self._tracking_index else clean_tracking_no)
+            # 매칭된 키로 페이지 추출
+            pdf_path = self.extract_page_to_temp(matched_key)
             if not pdf_path:
-                self.print_error.emit(f"페이지 추출 실패: {tracking_no}")
+                self.print_error.emit(f"페이지 추출 실패: {tracking_no} (매칭 키: {matched_key})")
                 return False
         else:
             # 인덱스에 없으면 직접 파일 찾기 (하이픈 제거 버전으로 검색)
