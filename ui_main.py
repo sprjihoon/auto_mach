@@ -633,7 +633,7 @@ class MainWindow(QMainWindow):
                 original_path = Path(file_path)
                 cropped_path = temp_dir / f"cropped_{original_path.stem}.pdf"
                 
-                self._add_log("PDF 크롭 처리 중... (107mm × 168mm)")
+                self._add_log("PDF 크롭 처리 중... (168mm × 107mm)")
                 normalize_pdf(file_path, str(cropped_path))
                 self._add_log(f"✓ PDF 크롭 완료: {cropped_path}")
                 

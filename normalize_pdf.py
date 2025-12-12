@@ -25,13 +25,13 @@ except ImportError:
 # mm → pt 변환 상수 (1 inch = 25.4 mm, 1 inch = 72 pt)
 MM_TO_PT = 72.0 / 25.4
 
-# 우체국 송장 규격 (mm)
-LABEL_WIDTH_MM = 107.0
-LABEL_HEIGHT_MM = 168.0
+# 우체국 송장 규격 (mm) - 가로 × 세로
+LABEL_WIDTH_MM = 168.0  # 가로
+LABEL_HEIGHT_MM = 107.0  # 세로
 
 # 포인트 단위로 변환
-LABEL_WIDTH_PT = LABEL_WIDTH_MM * MM_TO_PT  # 약 303.307 pt
-LABEL_HEIGHT_PT = LABEL_HEIGHT_MM * MM_TO_PT  # 약 476.221 pt
+LABEL_WIDTH_PT = LABEL_WIDTH_MM * MM_TO_PT  # 약 476.221 pt (가로)
+LABEL_HEIGHT_PT = LABEL_HEIGHT_MM * MM_TO_PT  # 약 303.307 pt (세로)
 
 
 def detect_content_bbox(pdf_path: str, page_num: int = 0) -> Tuple[float, float, float, float]:
@@ -112,12 +112,12 @@ def detect_content_bbox(pdf_path: str, page_num: int = 0) -> Tuple[float, float,
 
 def normalize_pdf(input_path: str, output_path: str) -> bool:
     """
-    PDF를 좌측 상단(0,0) 기준으로 107mm × 168mm 영역만 크롭하여 정규화
+    PDF를 좌측 상단(0,0) 기준으로 168mm × 107mm 영역만 크롭하여 정규화
     
     처리 과정:
-    1. 좌측 상단(0,0) 기준으로 107mm × 168mm 크롭
+    1. 좌측 상단(0,0) 기준으로 168mm × 107mm 크롭 (가로 × 세로)
     2. 회전 없이 원본 방향 유지
-    3. 최종 크기: 107mm × 168mm
+    3. 최종 크기: 168mm × 107mm
     
     Args:
         input_path: 입력 PDF 파일 경로
@@ -153,7 +153,7 @@ def normalize_pdf(input_path: str, output_path: str) -> bool:
             # - 좌측 하단 좌표: (0, 0)
             # - 우측 상단 좌표: (original_width, original_height)
             # 
-            # 좌측 상단을 기준으로 107mm × 168mm 크롭하려면:
+            # 좌측 상단을 기준으로 168mm × 107mm 크롭하려면:
             # - 크롭 영역의 좌측 하단: (0, original_height - LABEL_HEIGHT_PT)
             # - 크롭 영역의 우측 상단: (LABEL_WIDTH_PT, original_height)
             #
@@ -182,7 +182,7 @@ def normalize_pdf(input_path: str, output_path: str) -> bool:
             new_page.cropbox.upper_right = (crop_box[2], crop_box[3])
             
             # MediaBox도 동일하게 설정 (페이지 물리적 크기)
-            # 크롭 후 크기: crop_width × crop_height (107mm × 168mm)
+            # 크롭 후 크기: crop_width × crop_height (168mm × 107mm)
             new_page.mediabox.lower_left = (0.0, 0.0)
             new_page.mediabox.upper_right = (crop_width, crop_height)
             
