@@ -3,6 +3,7 @@ PySide6 UI 화면
 """
 import sys
 import os
+import re
 from pathlib import Path
 from typing import Optional
 from PySide6.QtWidgets import (
@@ -413,6 +414,15 @@ class MainWindow(QMainWindow):
         
         layout.addWidget(button_group)
         
+        # 검색 상태 표시 영역
+        status_group = QGroupBox("검색 상태")
+        status_layout = QVBoxLayout(status_group)
+        self.reprint_status_label = QLabel("검색 대기 중...")
+        self.reprint_status_label.setWordWrap(True)
+        self.reprint_status_label.setStyleSheet("color: #666; font-size: 11px; padding: 5px;")
+        status_layout.addWidget(self.reprint_status_label)
+        layout.addWidget(status_group)
+        
         # 검색 결과 저장
         self._reprint_search_result = None
         self._reprint_search_cancelled = False
@@ -424,10 +434,24 @@ class MainWindow(QMainWindow):
     @Slot()
     def _on_reprint_search(self):
         """재출력 검색 실행"""
+        # 입력값 정규화 (앞뒤 공백 제거, 내부 공백/하이픈은 유지)
         input_value = self.reprint_input.text().strip()
         
         if not input_value:
             QMessageBox.warning(self, "경고", "송장번호 또는 주문번호를 입력해주세요.")
+            return
+        
+        # 입력값에서 숫자만 추출하여 길이 확인 (최소 11자리)
+        numbers_only = re.sub(r'[-–—\s]', '', input_value)
+        if not numbers_only.isdigit() or len(numbers_only) < 8:
+            QMessageBox.warning(
+                self,
+                "입력 오류",
+                f"올바른 송장번호 또는 주문번호를 입력해주세요.\n\n"
+                f"입력값: {input_value}\n"
+                f"숫자만 추출: {numbers_only}\n\n"
+                f"송장번호는 11자리 이상, 주문번호는 8자리 이상이어야 합니다."
+            )
             return
         
         # 출력 옵션 확인
@@ -459,6 +483,20 @@ class MainWindow(QMainWindow):
         self.reprint_execute_btn.setEnabled(False)
         self._reprint_search_cancelled = False
         
+        # 멀티코어 사용 여부 확인
+        use_multicore = self.reprint_multicore_check.isChecked()
+        import multiprocessing
+        cpu_count = multiprocessing.cpu_count()
+        worker_count = max(1, int(cpu_count * 0.7)) if use_multicore else 1
+        
+        # 검색 상태 표시
+        if use_multicore:
+            status_text = f"🔍 검색 중... (멀티스레드: {worker_count}개 워커 사용, CPU 코어 {cpu_count}개 중 {worker_count}개 활용)"
+        else:
+            status_text = f"🔍 검색 중... (단일스레드: CPU 코어 {cpu_count}개 중 1개 사용)"
+        self.reprint_status_label.setText(status_text)
+        self.reprint_status_label.setStyleSheet("color: #2196F3; font-size: 11px; padding: 5px; font-weight: bold;")
+        
         # 취소 플래그 객체 생성
         class CancelFlag:
             def __init__(self):
@@ -466,9 +504,6 @@ class MainWindow(QMainWindow):
         
         cancel_flag = CancelFlag()
         self._reprint_cancel_flag = cancel_flag
-        
-        # 멀티코어 사용 여부 확인
-        use_multicore = self.reprint_multicore_check.isChecked()
         
         # 멀티코어 PDF 검색 시작
         search_mode = "멀티코어" if use_multicore else "단일코어"
@@ -481,9 +516,18 @@ class MainWindow(QMainWindow):
             try:
                 # 진행 상황 콜백 함수
                 def progress_callback(message: str):
-                    # 메인 스레드에서 안전하게 로그 추가
+                    # 메인 스레드에서 안전하게 로그 및 상태 업데이트
                     from PySide6.QtCore import QTimer
                     QTimer.singleShot(0, lambda: self._add_log(f"[REPRINT-SEARCH] {message}"))
+                    # 상태 라벨도 업데이트
+                    if "검색 중" in message or "파일 검사" in message:
+                        QTimer.singleShot(0, lambda: self.reprint_status_label.setText(f"🔍 {message}"))
+                
+                # 디버그 콜백 함수
+                def debug_callback(message: str):
+                    # 디버그 메시지도 UI에 표시
+                    from PySide6.QtCore import QTimer
+                    QTimer.singleShot(0, lambda: self._add_log(message))
                 
                 # PDF 파일 전체 검색
                 search_result = find_pdf_by_tracking_or_order(
@@ -491,7 +535,8 @@ class MainWindow(QMainWindow):
                     search_folders,
                     use_multicore=use_multicore,
                     cancel_flag=cancel_flag,
-                    progress_callback=progress_callback
+                    progress_callback=progress_callback,
+                    debug_callback=debug_callback
                 )
                 
                 # 시그널로 UI 업데이트 (메인 스레드에서 안전하게 처리)
@@ -522,6 +567,8 @@ class MainWindow(QMainWindow):
         """재출력 검색 완료 처리 (시그널 핸들러)"""
         if cancelled:
             self._add_log("[REPRINT-SEARCH] 검색이 취소되었습니다.")
+            self.reprint_status_label.setText("⏹ 검색 취소됨")
+            self.reprint_status_label.setStyleSheet("color: #FF9800; font-size: 11px; padding: 5px;")
             self.reprint_search_btn.setEnabled(True)
             self.reprint_cancel_btn.setEnabled(False)
             return
@@ -541,18 +588,49 @@ class MainWindow(QMainWindow):
                 self._add_log(f"[REPRINT-SEARCH] ✓ 송장번호 '{tracking_no}' 찾았습니다!{format_info}")
                 self._add_log(f"[REPRINT-SEARCH] 파일: {Path(found_pdf_path).name}")
                 self._add_log(f"[REPRINT-SEARCH] 경로: {found_pdf_path}")
+                
+                # 검색 성공 상태 표시 및 알러트
+                self.reprint_status_label.setText(f"✅ 검색 성공! 송장번호 '{tracking_no}' 찾았습니다.")
+                self.reprint_status_label.setStyleSheet("color: #4CAF50; font-size: 11px; padding: 5px; font-weight: bold;")
+                
+                QMessageBox.information(
+                    self,
+                    "검색 성공",
+                    f"송장번호를 찾았습니다!\n\n"
+                    f"송장번호: {tracking_no}\n"
+                    f"파일: {Path(found_pdf_path).name}\n"
+                    f"경로: {found_pdf_path}\n\n"
+                    f"재출력 버튼을 클릭하여 출력하세요."
+                )
             elif result_type == "order":
                 order_no = search_result.get("order_no")
                 format_info = f" (원본 형식: {original_format})" if original_format else ""
                 self._add_log(f"[REPRINT-SEARCH] ✓ 주문번호 '{order_no}' 찾았습니다!{format_info}")
                 self._add_log(f"[REPRINT-SEARCH] 파일: {Path(found_pdf_path).name}")
                 self._add_log(f"[REPRINT-SEARCH] 경로: {found_pdf_path}")
+                
+                # 검색 성공 상태 표시 및 알러트
+                self.reprint_status_label.setText(f"✅ 검색 성공! 주문번호 '{order_no}' 찾았습니다.")
+                self.reprint_status_label.setStyleSheet("color: #4CAF50; font-size: 11px; padding: 5px; font-weight: bold;")
+                
+                QMessageBox.information(
+                    self,
+                    "검색 성공",
+                    f"주문번호를 찾았습니다!\n\n"
+                    f"주문번호: {order_no}\n"
+                    f"파일: {Path(found_pdf_path).name}\n"
+                    f"경로: {found_pdf_path}\n\n"
+                    f"재출력 버튼을 클릭하여 출력하세요."
+                )
             
             # 재출력 버튼 활성화
             self.reprint_execute_btn.setEnabled(True)
             self._add_log("[REPRINT-SEARCH] ✅ 검색 완료! 재출력 버튼을 클릭하여 출력하세요.")
         else:
             self._add_log(f"[REPRINT-SEARCH] 검색 실패: {input_value}를 찾을 수 없습니다.")
+            self.reprint_status_label.setText(f"❌ 검색 실패: '{input_value}'를 찾을 수 없습니다.")
+            self.reprint_status_label.setStyleSheet("color: #F44336; font-size: 11px; padding: 5px; font-weight: bold;")
+            
             QMessageBox.warning(
                 self,
                 "검색 실패",
@@ -560,7 +638,8 @@ class MainWindow(QMainWindow):
                 f"입력값: {input_value}\n\n"
                 f"확인 사항:\n"
                 f"- 송장번호/주문번호가 정확한지 확인\n"
-                f"- PDF 파일이 선택한 폴더에 있는지 확인"
+                f"- PDF 파일이 선택한 폴더에 있는지 확인\n"
+                f"- 하이픈(-) 포함 여부 확인"
             )
         
         # UI 상태 복원
@@ -707,27 +786,6 @@ class MainWindow(QMainWindow):
                     if success:
                         printer_display = a4_printer if a4_printer else "기본 프린터"
                         self._add_log(f"[REPRINT-MANUAL] 주문서 출력 성공: {tracking_no} → {printer_display}")
-                        success_count += 1
-                    else:
-                        self._add_log(f"[REPRINT-MANUAL] 주문서 출력 실패: {tracking_no}")
-                        fail_count += 1
-                    
-                    # 임시 파일 삭제 (keep_temp_files 설정 확인)
-                    if not self.pdf_printer.keep_temp_files and temp_pdf_path.exists():
-                        try:
-                            temp_pdf_path.unlink()
-                        except:
-                            pass
-                else:
-                    # 추출 실패 시 원본 파일 직접 출력
-                    if a4_printer:
-                        success = print_pdf_with_printer(str(order_path), a4_printer)
-                    else:
-                        success = print_pdf_with_printer(str(order_path), None)
-                    
-                    if success:
-                        printer_display = a4_printer if a4_printer else "기본 프린터"
-                        self._add_log(f"[REPRINT-MANUAL] 주문서 출력 성공: {tracking_no} (원본 파일) → {printer_display}")
                         success_count += 1
                     else:
                         self._add_log(f"[REPRINT-MANUAL] 주문서 출력 실패: {tracking_no}")
