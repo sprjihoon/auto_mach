@@ -36,6 +36,7 @@ class PDFPrinter(QObject):
         self._tracking_index: Dict[str, Tuple[Path, int]] = {}  # {tracking_no: (pdf_path, page_num)}
         self._temp_dir = Path(tempfile.gettempdir()) / "auto_mach_labels"
         self._temp_dir.mkdir(exist_ok=True)
+        self._keep_temp_files = False  # 출력 후 임시 파일 삭제 (기본값: False)
     
     @property
     def enabled(self) -> bool:
@@ -44,6 +45,16 @@ class PDFPrinter(QObject):
     @enabled.setter
     def enabled(self, value: bool):
         self._enabled = value
+    
+    @property
+    def keep_temp_files(self) -> bool:
+        """임시 파일 보관 여부"""
+        return self._keep_temp_files
+    
+    @keep_temp_files.setter
+    def keep_temp_files(self, value: bool):
+        """임시 파일 보관 여부 설정 (True: 출력 후에도 임시 파일 유지, False: 출력 후 삭제)"""
+        self._keep_temp_files = value
     
     def set_labels_directory(self, path: str):
         """라벨 PDF 폴더 경로 설정 (하위 호환)"""
@@ -712,6 +723,18 @@ class PDFPrinter(QObject):
                         # 실행 결과 확인
                         if result_returncode == 0:
                             self.print_success.emit(f"Adobe Reader 인쇄 명령 전송 성공: {tracking_no}")
+                            
+                            # 출력 후 임시 파일 삭제 (기본값: 삭제)
+                            if not self._keep_temp_files and pdf_path and pdf_path.exists():
+                                # 인쇄 명령 전송 후 잠시 대기 후 삭제 (인쇄가 시작될 시간 확보)
+                                import time
+                                time.sleep(2)  # 2초 대기
+                                try:
+                                    pdf_path.unlink()
+                                    self.print_success.emit(f"임시 파일 삭제: {pdf_path.name}")
+                                except Exception as e:
+                                    # 삭제 실패해도 인쇄는 정상 진행됨
+                                    self.print_success.emit(f"임시 파일 삭제 실패 (무시): {str(e)}")
                         else:
                             self.print_error.emit(f"Adobe Reader 인쇄 실패")
                         if HAS_WIN32API:
@@ -779,6 +802,17 @@ class PDFPrinter(QObject):
                                     creationflags=subprocess.CREATE_NO_WINDOW
                                 )
                                 self.print_success.emit(f"실물 프린터 인쇄 요청: {tracking_no} (기본 PDF 뷰어로 인쇄)")
+                                
+                                # 출력 후 임시 파일 삭제 (기본값: 삭제)
+                                if not self._keep_temp_files and pdf_path and pdf_path.exists():
+                                    import time
+                                    time.sleep(2)
+                                    try:
+                                        pdf_path.unlink()
+                                        self.print_success.emit(f"임시 파일 삭제: {pdf_path.name}")
+                                    except Exception:
+                                        pass
+                                
                                 return True
                 except Exception:
                     pass
@@ -801,6 +835,17 @@ class PDFPrinter(QObject):
                         0
                     )
                     self.print_success.emit(f"실물 프린터 인쇄 요청: {tracking_no} ({default_printer}로 인쇄)")
+                    
+                    # 출력 후 임시 파일 삭제 (기본값: 삭제)
+                    if not self._keep_temp_files and pdf_path and pdf_path.exists():
+                        import time
+                        time.sleep(2)
+                        try:
+                            pdf_path.unlink()
+                            self.print_success.emit(f"임시 파일 삭제: {pdf_path.name}")
+                        except Exception:
+                            pass
+                    
                     return True
                 except Exception as e:
                     self.print_error.emit(f"ShellExecute 인쇄 실패: {str(e)}")
@@ -809,6 +854,17 @@ class PDFPrinter(QObject):
             try:
                 os.startfile(pdf_path_str, "print")
                 self.print_success.emit(f"실물 프린터 인쇄 요청: {tracking_no} (Windows 기본 인쇄 동사)")
+                
+                # 출력 후 임시 파일 삭제 (기본값: 삭제)
+                if not self._keep_temp_files and pdf_path and pdf_path.exists():
+                    import time
+                    time.sleep(2)
+                    try:
+                        pdf_path.unlink()
+                        self.print_success.emit(f"임시 파일 삭제: {pdf_path.name}")
+                    except Exception:
+                        pass
+                
                 return True
             except (OSError, FileNotFoundError) as e:
                 self.print_error.emit(f"os.startfile 인쇄 실패: {str(e)}")

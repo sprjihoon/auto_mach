@@ -31,6 +31,9 @@ class ExcelLoader(QObject):
         '상품수량': 'qty',
         '로케이션': 'location',
         '위치': 'location',
+        '주문일': 'order_date',
+        '주문시간': 'order_time',
+        '주문번호': 'order_no',
     }
     
     # 대체 컬럼명 (상품수량이 없을 때만 사용)
@@ -182,16 +185,195 @@ class ExcelLoader(QObject):
             self.df['scanned_qty'] = self.df['scanned_qty'].fillna(0).astype(int)
             self.df['used'] = self.df['used'].fillna(0).astype(int)
             
-            # order_datetime 컬럼이 없으면 로딩 순서 기반으로 생성
+            # order_datetime 컬럼 생성
             if 'order_datetime' not in self.df.columns:
-                # 각 tracking_no의 첫 번째 출현 순서를 기반으로 datetime 생성
-                tracking_order = self.df['tracking_no'].drop_duplicates().reset_index(drop=True)
-                order_dict = {tn: idx for idx, tn in enumerate(tracking_order)}
-                # 인덱스를 datetime으로 변환 (2020-01-01부터 시작, 하루 간격)
-                base_date = datetime(2020, 1, 1)
-                self.df['order_datetime'] = self.df['tracking_no'].map(
-                    lambda tn: base_date.replace(day=1 + (order_dict.get(tn, 0) % 28))
-                )
+                # 1. 주문번호(order_no) 컬럼이 있으면 주문번호 순서로 생성 (가장 우선)
+                has_order_no = 'order_no' in self.df.columns
+                
+                if has_order_no:
+                    # 주문번호를 기준으로 정렬하여 순서 결정
+                    # 주문번호 형식 예: "20251212-0000051" (날짜-순서)
+                    def parse_order_datetime_from_order_no(row):
+                        """주문번호에서 datetime 추출 또는 주문번호 순서로 datetime 생성"""
+                        try:
+                            order_no = row['order_no'] if 'order_no' in row.index else None
+                            if pd.notna(order_no):
+                                order_no_str = str(order_no).strip()
+                                
+                                # 주문번호 형식 파싱 시도 (예: "20251212-0000051")
+                                # 앞부분이 날짜 형식인지 확인 (YYYYMMDD)
+                                if '-' in order_no_str:
+                                    date_part = order_no_str.split('-')[0]
+                                    if len(date_part) == 8 and date_part.isdigit():
+                                        # YYYYMMDD 형식 파싱
+                                        year = int(date_part[:4])
+                                        month = int(date_part[4:6])
+                                        day = int(date_part[6:8])
+                                        # 기본 시간으로 datetime 생성 (순서는 주문번호 정렬로 결정)
+                                        return datetime(year, month, day, 0, 0, 0)
+                                
+                                # 숫자만 있는 경우 (예: "202512120000051")
+                                if order_no_str.isdigit() and len(order_no_str) >= 8:
+                                    # 앞 8자리가 날짜일 가능성
+                                    date_part = order_no_str[:8]
+                                    year = int(date_part[:4])
+                                    month = int(date_part[4:6])
+                                    day = int(date_part[6:8])
+                                    return datetime(year, month, day, 0, 0, 0)
+                        except:
+                            pass
+                        return None
+                    
+                    # 각 행에 대해 주문번호에서 datetime 추출 시도
+                    self.df['order_datetime'] = self.df.apply(parse_order_datetime_from_order_no, axis=1)
+                    
+                    # 주문번호에서 날짜를 추출하지 못한 경우, 주문번호 순서로 정렬하여 datetime 생성
+                    if self.df['order_datetime'].isna().any():
+                        # 주문번호로 정렬하여 순서 결정
+                        order_no_sorted = self.df['order_no'].drop_duplicates().sort_values().reset_index(drop=True)
+                        order_no_to_idx = {no: idx for idx, no in enumerate(order_no_sorted)}
+                        
+                        # tracking_no별로 첫 번째 주문번호 사용
+                        tracking_to_order_no = {}
+                        for tracking_no, group in self.df.groupby('tracking_no'):
+                            first_order_no = group['order_no'].iloc[0] if 'order_no' in group.columns else None
+                            if pd.notna(first_order_no):
+                                tracking_to_order_no[tracking_no] = first_order_no
+                        
+                        # 주문번호 순서를 datetime으로 변환 (2020-01-01부터 시작, 하루 간격)
+                        base_date = datetime(2020, 1, 1)
+                        def get_datetime_from_order_no(tracking_no):
+                            order_no = tracking_to_order_no.get(tracking_no)
+                            if order_no is None:
+                                return None
+                            idx = order_no_to_idx.get(order_no, 0)
+                            return base_date.replace(day=1 + (idx % 28))
+                        
+                        # order_datetime이 없는 행에 대해 주문번호 순서로 생성
+                        mask_na = self.df['order_datetime'].isna()
+                        if mask_na.any():
+                            self.df.loc[mask_na, 'order_datetime'] = self.df.loc[mask_na, 'tracking_no'].map(get_datetime_from_order_no)
+                    
+                    # 여전히 None이 있으면 로딩 순서로 대체
+                    if self.df['order_datetime'].isna().any():
+                        tracking_order = self.df['tracking_no'].drop_duplicates().reset_index(drop=True)
+                        order_dict = {tn: idx for idx, tn in enumerate(tracking_order)}
+                        base_date = datetime(2020, 1, 1)
+                        mask_na = self.df['order_datetime'].isna()
+                        self.df.loc[mask_na, 'order_datetime'] = self.df.loc[mask_na, 'tracking_no'].map(
+                            lambda tn: base_date.replace(day=1 + (order_dict.get(tn, 0) % 28))
+                        )
+                
+                # 2. 주문번호가 없으면 주문일(order_date)과 주문시간(order_time) 컬럼 확인
+                elif 'order_date' in self.df.columns or 'order_time' in self.df.columns:
+                    has_order_date = 'order_date' in self.df.columns
+                    has_order_time = 'order_time' in self.df.columns
+                    
+                    if has_order_date or has_order_time:
+                    def combine_datetime(row):
+                        """주문일과 주문시간을 합쳐서 datetime 생성"""
+                        order_date = None
+                        order_time = None
+                        
+                        # 주문일 찾기 (pandas Series는 인덱스로 접근)
+                        if has_order_date:
+                            try:
+                                order_date = row['order_date'] if 'order_date' in row.index else None
+                            except:
+                                order_date = None
+                        # 주문시간 찾기
+                        if has_order_time:
+                            try:
+                                order_time = row['order_time'] if 'order_time' in row.index else None
+                            except:
+                                order_time = None
+                        
+                        # 주문일 처리
+                        if pd.notna(order_date):
+                            if isinstance(order_date, datetime):
+                                date_part = order_date
+                            elif isinstance(order_date, str):
+                                try:
+                                    date_part = pd.to_datetime(order_date).to_pydatetime()
+                                except:
+                                    date_part = None
+                            else:
+                                try:
+                                    date_part = pd.to_datetime(order_date).to_pydatetime()
+                                except:
+                                    date_part = None
+                        else:
+                            date_part = None
+                        
+                        # 주문시간 처리
+                        if pd.notna(order_time):
+                            if isinstance(order_time, datetime):
+                                time_part = order_time
+                            elif isinstance(order_time, str):
+                                try:
+                                    # 시간 문자열 파싱 (예: "10:30:00", "10:30")
+                                    time_str = str(order_time).strip()
+                                    if ':' in time_str:
+                                        parts = time_str.split(':')
+                                        if len(parts) >= 2:
+                                            hour = int(parts[0])
+                                            minute = int(parts[1])
+                                            second = int(parts[2]) if len(parts) > 2 else 0
+                                            time_part = datetime(1900, 1, 1, hour, minute, second).time()
+                                        else:
+                                            time_part = None
+                                    else:
+                                        time_part = None
+                                except:
+                                    time_part = None
+                            else:
+                                try:
+                                    time_part = pd.to_datetime(order_time).to_pydatetime().time()
+                                except:
+                                    time_part = None
+                        else:
+                            time_part = None
+                        
+                        # 날짜와 시간 합치기
+                        if date_part:
+                            if isinstance(date_part, datetime):
+                                if time_part:
+                                    if isinstance(time_part, datetime):
+                                        return time_part.replace(year=date_part.year, month=date_part.month, day=date_part.day)
+                                    elif hasattr(time_part, 'hour'):
+                                        return date_part.replace(hour=time_part.hour, minute=time_part.minute, second=time_part.second)
+                                return date_part
+                            else:
+                                try:
+                                    date_dt = pd.to_datetime(date_part).to_pydatetime()
+                                    if time_part and hasattr(time_part, 'hour'):
+                                        return date_dt.replace(hour=time_part.hour, minute=time_part.minute, second=time_part.second)
+                                    return date_dt
+                                except:
+                                    pass
+                        
+                        return None
+                    
+                    # 각 행에 대해 datetime 생성
+                    self.df['order_datetime'] = self.df.apply(combine_datetime, axis=1)
+                    
+                    # 생성 실패한 경우를 위해 로딩 순서 기반으로 대체
+                    if self.df['order_datetime'].isna().all():
+                        # 각 tracking_no의 첫 번째 출현 순서를 기반으로 datetime 생성
+                        tracking_order = self.df['tracking_no'].drop_duplicates().reset_index(drop=True)
+                        order_dict = {tn: idx for idx, tn in enumerate(tracking_order)}
+                        base_date = datetime(2020, 1, 1)
+                        self.df['order_datetime'] = self.df['tracking_no'].map(
+                            lambda tn: base_date.replace(day=1 + (order_dict.get(tn, 0) % 28))
+                        )
+                else:
+                    # 주문일/주문시간 컬럼도 없으면 로딩 순서 기반으로 생성
+                    tracking_order = self.df['tracking_no'].drop_duplicates().reset_index(drop=True)
+                    order_dict = {tn: idx for idx, tn in enumerate(tracking_order)}
+                    base_date = datetime(2020, 1, 1)
+                    self.df['order_datetime'] = self.df['tracking_no'].map(
+                        lambda tn: base_date.replace(day=1 + (order_dict.get(tn, 0) % 28))
+                    )
             
             # 메타데이터 캐시 초기화
             self._metadata_cache = None

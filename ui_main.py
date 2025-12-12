@@ -322,6 +322,13 @@ class MainWindow(QMainWindow):
         self.pdf_check.toggled.connect(self._on_toggle_pdf)
         layout.addWidget(self.pdf_check)
         
+        # PDF 임시 파일 보관 옵션
+        self.pdf_keep_temp_check = QCheckBox("임시 파일 보관")
+        self.pdf_keep_temp_check.setChecked(False)  # 기본값: 삭제
+        self.pdf_keep_temp_check.setToolTip("체크 시 출력 후 임시 PDF 파일을 보관합니다 (기본: 출력 후 삭제)")
+        self.pdf_keep_temp_check.toggled.connect(self._on_toggle_pdf_keep_temp)
+        layout.addWidget(self.pdf_keep_temp_check)
+        
         # 오른쪽 여백 (창 최대화 시 벌어짐 방지)
         layout.addStretch()
         
@@ -1173,6 +1180,12 @@ class MainWindow(QMainWindow):
         """PDF 출력 활성화/비활성화"""
         self.pdf_printer.enabled = checked
         self._add_log(f"PDF 출력: {'활성' if checked else '비활성'}")
+    
+    @Slot(bool)
+    def _on_toggle_pdf_keep_temp(self, checked: bool):
+        """PDF 임시 파일 보관 옵션"""
+        self.pdf_printer.keep_temp_files = checked
+        self._add_log(f"PDF 임시 파일: {'보관' if checked else '출력 후 삭제'}")
     
     @Slot()
     def _on_priority_changed(self):
