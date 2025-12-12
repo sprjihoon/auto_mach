@@ -632,12 +632,30 @@ class PDFPrinter(QObject):
                 if os.path.exists(reader_path):
                     try:
                         # Adobe Reader/Acrobat로 기본 프린터에 직접 인쇄
-                        # /t: 인쇄 후 자동 종료
-                        # 참고: Adobe Reader는 프린터 설정(용지에 맞춤, 크기 조정 등)을 자동으로 사용
+                        # /t "파일" "프린터명": 지정된 프린터로 인쇄 후 종료
+                        # /p "파일": 기본 프린터로 인쇄 (인쇄 대화상자 없이)
                         
-                        # 프린터 크기 조정을 위해 Popen으로 변경 (비동기 실행)
+                        # 기본 프린터 이름 가져오기
+                        printer_name = None
+                        if HAS_WIN32API:
+                            try:
+                                printer_name = win32print.GetDefaultPrinter()
+                            except:
+                                pass
+                        
+                        # 프린터 이름이 있으면 /t 옵션 사용, 없으면 /p 사용
+                        if printer_name:
+                            # /t "파일" "프린터명" - 지정된 프린터로 인쇄 후 종료
+                            cmd = [reader_path, "/t", pdf_path_str, printer_name]
+                            self.print_success.emit(f"인쇄 명령: {reader_path} /t → {printer_name}")
+                        else:
+                            # /p "파일" - 기본 프린터로 인쇄
+                            cmd = [reader_path, "/p", pdf_path_str]
+                            self.print_success.emit(f"인쇄 명령: {reader_path} /p")
+                        
+                        # 프린터로 인쇄 명령 전송
                         subprocess.Popen(
-                            [reader_path, "/t", pdf_path_str],
+                            cmd,
                             shell=False,
                             stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL,
