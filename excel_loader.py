@@ -3,7 +3,8 @@
 """
 import pandas as pd
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, Any, List
+from datetime import datetime
 from PySide6.QtCore import QObject, Signal
 
 from utils import get_base_path, get_timestamp
@@ -16,6 +17,7 @@ class ExcelLoader(QObject):
     data_loaded = Signal()
     data_updated = Signal()
     error_occurred = Signal(str)
+    priority_cleared = Signal(str)  # 완료된 우선 송장 해제 시그널
     
     # 필수 컬럼 (영어)
     REQUIRED_COLUMNS = ['tracking_no', 'barcode', 'product_name', 'option_name', 'qty']
@@ -38,6 +40,12 @@ class ExcelLoader(QObject):
         super().__init__()
         self.df: Optional[pd.DataFrame] = None
         self.file_path: Optional[Path] = None
+        # 송장별 메타데이터 캐시 (성능 최적화)
+        self._metadata_cache: Optional[Dict[str, Dict[str, Any]]] = None
+        # 우선순위 규칙 (기본값: 단품 우선)
+        self._priority_rules: Optional[Dict[str, bool]] = None
+        # 송장별 ⭐ 고정 상태 저장 (tracking_no -> is_priority)
+        self._priority_tracking: Dict[str, bool] = {}
     
     def load_excel(self, file_path: str) -> bool:
         """엑셀 파일 로드 (xls, xlsx, csv, html 등 지원)"""
@@ -174,6 +182,21 @@ class ExcelLoader(QObject):
             self.df['scanned_qty'] = self.df['scanned_qty'].fillna(0).astype(int)
             self.df['used'] = self.df['used'].fillna(0).astype(int)
             
+            # order_datetime 컬럼이 없으면 로딩 순서 기반으로 생성
+            if 'order_datetime' not in self.df.columns:
+                # 각 tracking_no의 첫 번째 출현 순서를 기반으로 datetime 생성
+                tracking_order = self.df['tracking_no'].drop_duplicates().reset_index(drop=True)
+                order_dict = {tn: idx for idx, tn in enumerate(tracking_order)}
+                # 인덱스를 datetime으로 변환 (2020-01-01부터 시작, 하루 간격)
+                base_date = datetime(2020, 1, 1)
+                self.df['order_datetime'] = self.df['tracking_no'].map(
+                    lambda tn: base_date.replace(day=1 + (order_dict.get(tn, 0) % 28))
+                )
+            
+            # 메타데이터 캐시 초기화
+            self._metadata_cache = None
+            # ⭐ 고정 상태는 유지 (엑셀 재로드 시에도 보존)
+            
             self.data_loaded.emit()
             return True
             
@@ -230,27 +253,140 @@ class ExcelLoader(QObject):
         mask = (df_barcodes == barcode) & (self.df['used'] == 0)
         return self.df[mask].copy()
     
-    def find_candidates(self, barcode: str) -> pd.DataFrame:
+    def set_priority_rules(self, rules: Dict[str, bool]):
         """
-        바코드로 후보 검색 후 우선순위 정렬
-        단품(구성 적은 것) → 소형조합 → 대형조합 순서
-        동일 구성 수면 tracking_no 오름차순
+        우선순위 규칙 설정
+        
+        Args:
+            rules: 우선순위 규칙 딕셔너리
         """
+        self._priority_rules = rules
+        # 메타데이터 캐시 무효화 (규칙 변경 시 재계산 필요)
+        self._metadata_cache = None
+    
+    def get_order_metadata(self, tracking_no: str) -> Dict[str, Any]:
+        """
+        송장 메타데이터 수집
+        
+        Args:
+            tracking_no: 송장번호
+        
+        Returns:
+            메타데이터 딕셔너리
+        """
+        if self.df is None:
+            return {}
+        
+        # 캐시 확인
+        if self._metadata_cache is None:
+            self._build_metadata_cache()
+        
+        return self._metadata_cache.get(tracking_no, {})
+    
+    def _build_metadata_cache(self):
+        """모든 송장의 메타데이터 캐시 구축"""
+        if self.df is None:
+            self._metadata_cache = {}
+            return
+        
+        self._metadata_cache = {}
+        pending = self.df[self.df['used'] == 0]
+        
+        if pending.empty:
+            return
+        
+        # tracking_no별 그룹화
+        for tracking_no, group in pending.groupby('tracking_no'):
+            # order_datetime: 첫 번째 행의 order_datetime 사용
+            order_datetime = None
+            if 'order_datetime' in group.columns:
+                first_datetime = group['order_datetime'].iloc[0]
+                if pd.notna(first_datetime):
+                    if isinstance(first_datetime, datetime):
+                        order_datetime = first_datetime
+                    elif isinstance(first_datetime, str):
+                        try:
+                            dt = pd.to_datetime(first_datetime)
+                            # pandas Timestamp를 Python datetime으로 변환
+                            order_datetime = dt.to_pydatetime() if hasattr(dt, 'to_pydatetime') else dt
+                        except:
+                            pass
+                    elif hasattr(first_datetime, 'to_pydatetime'):
+                        # pandas Timestamp인 경우
+                        try:
+                            order_datetime = first_datetime.to_pydatetime()
+                        except:
+                            pass
+            
+            # item_count: qty 합계
+            item_count = int(group['qty'].sum())
+            
+            # sku_count: 고유 바코드 수
+            sku_count = group['barcode'].nunique()
+            
+            # is_single: 단품 여부
+            is_single = (sku_count == 1)
+            
+            # is_priority: 수동 우선순위 (⭐ 고정 상태)
+            # _priority_tracking에서 조회, 없으면 False
+            is_priority = self._priority_tracking.get(tracking_no, False)
+            
+            self._metadata_cache[tracking_no] = {
+                "tracking_no": tracking_no,
+                "order_datetime": order_datetime,
+                "item_count": item_count,
+                "sku_count": sku_count,
+                "is_single": is_single,
+                "is_priority": is_priority
+            }
+    
+    def find_candidates(self, barcode: str, priority_rules: Optional[Dict[str, bool]] = None) -> pd.DataFrame:
+        """
+        바코드로 후보 검색 후 우선순위 엔진을 사용하여 정렬
+        
+        [기존 단품 우선 로직 제거됨]
+        이제 priority_engine을 사용하여 동적으로 우선순위 결정
+        
+        Args:
+            barcode: 검색할 바코드
+            priority_rules: 우선순위 규칙 (None이면 기본 규칙 사용)
+        
+        Returns:
+            우선순위 정렬된 후보 DataFrame
+        """
+        from priority_engine import calc_priority_score, get_default_rules
+        
         candidates = self.find_by_barcode(barcode)
         if candidates.empty:
             return candidates
         
-        # 각 tracking_no의 전체 구성 수 계산
-        tracking_counts = self.df[self.df['used'] == 0].groupby('tracking_no').size()
+        # 우선순위 규칙 결정
+        if priority_rules is None:
+            if self._priority_rules is None:
+                priority_rules = get_default_rules()
+            else:
+                priority_rules = self._priority_rules
         
-        # 후보에 구성 수 추가
+        # 메타데이터 캐시 구축 (필요시)
+        if self._metadata_cache is None:
+            self._build_metadata_cache()
+        
+        # 각 후보에 대해 우선순위 점수 계산
         candidates = candidates.copy()
-        candidates['_total_items'] = candidates['tracking_no'].map(tracking_counts)
+        scores = []
         
-        # 우선순위 정렬: 구성 수 오름차순, tracking_no 오름차순
+        for _, row in candidates.iterrows():
+            tracking_no = str(row['tracking_no'])
+            meta = self.get_order_metadata(tracking_no)
+            score = calc_priority_score(meta, priority_rules)
+            scores.append(score)
+        
+        candidates['_priority_score'] = scores
+        
+        # 우선순위 점수 내림차순 정렬, 동일 점수면 tracking_no 오름차순
         candidates = candidates.sort_values(
-            by=['_total_items', 'tracking_no'],
-            ascending=[True, True]
+            by=['_priority_score', 'tracking_no'],
+            ascending=[False, True]
         ).reset_index(drop=False)  # 원본 인덱스 유지
         
         return candidates
@@ -290,6 +426,8 @@ class ExcelLoader(QObject):
             # qty 초과 방지
             if current_scanned < current_qty:
                 self.df.at[original_index, 'scanned_qty'] = current_scanned + 1
+                # 메타데이터 캐시 무효화 (데이터 변경 시)
+                self._metadata_cache = None
                 self.data_updated.emit()
                 return True
             return False
@@ -299,13 +437,22 @@ class ExcelLoader(QObject):
             return False
     
     def mark_used(self, tracking_no: str) -> bool:
-        """tracking_no 그룹 전체를 used=1로 표시"""
+        """
+        tracking_no 그룹 전체를 used=1로 표시
+        완료된 우선 송장(⭐)은 자동으로 해제됨
+        """
         if self.df is None:
             return False
         
         try:
             mask = self.df['tracking_no'] == tracking_no
             self.df.loc[mask, 'used'] = 1
+            
+            # 완료된 우선 송장 자동 해제
+            self._clear_priority_if_completed(tracking_no)
+            
+            # 메타데이터 캐시 무효화 (데이터 변경 시)
+            self._metadata_cache = None
             self.data_updated.emit()
             self.save_excel()  # 즉시 저장
             return True
@@ -313,6 +460,22 @@ class ExcelLoader(QObject):
         except Exception as e:
             self.error_occurred.emit(f"used 업데이트 오류: {str(e)}")
             return False
+    
+    def _clear_priority_if_completed(self, tracking_no: str):
+        """
+        완료된 우선 송장 자동 해제
+        
+        Args:
+            tracking_no: 완료된 송장번호
+        """
+        # is_priority가 True인 경우만 해제
+        if self.get_tracking_priority(tracking_no):
+            self.set_tracking_priority(tracking_no, False)
+            # 메타데이터 캐시에서도 제거 (이미 무효화되지만 명시적으로 처리)
+            if self._metadata_cache and tracking_no in self._metadata_cache:
+                self._metadata_cache[tracking_no]["is_priority"] = False
+            # UI 업데이트를 위한 시그널 발생
+            self.priority_cleared.emit(tracking_no)
     
     def get_all_pending(self) -> pd.DataFrame:
         """처리되지 않은 모든 항목 조회"""
@@ -339,4 +502,46 @@ class ExcelLoader(QObject):
         }).reset_index()
         
         return summary[summary['remaining'] > 0]
+    
+    def set_tracking_priority(self, tracking_no: str, is_priority: bool):
+        """
+        송장 ⭐ 고정 상태 설정
+        
+        Args:
+            tracking_no: 송장번호
+            is_priority: True면 ⭐ 고정, False면 해제
+        """
+        self._priority_tracking[tracking_no] = is_priority
+        # 메타데이터 캐시 무효화 (다음 조회 시 갱신)
+        if self._metadata_cache and tracking_no in self._metadata_cache:
+            # 해당 송장만 캐시에서 제거
+            del self._metadata_cache[tracking_no]
+    
+    def get_tracking_priority(self, tracking_no: str) -> bool:
+        """
+        송장 ⭐ 고정 상태 조회
+        
+        Args:
+            tracking_no: 송장번호
+        
+        Returns:
+            ⭐ 고정 여부
+        """
+        return self._priority_tracking.get(tracking_no, False)
+    
+    def get_all_tracking_numbers(self) -> List[str]:
+        """
+        모든 송장번호 목록 반환 (used=0인 것만)
+        
+        Returns:
+            송장번호 리스트
+        """
+        if self.df is None:
+            return []
+        
+        pending = self.df[self.df['used'] == 0]
+        if pending.empty:
+            return []
+        
+        return pending['tracking_no'].drop_duplicates().tolist()
 

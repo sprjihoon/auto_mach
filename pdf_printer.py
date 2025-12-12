@@ -79,28 +79,28 @@ class PDFPrinter(QObject):
         for pdf_path in pdf_files:
             try:
                 import re
-                # 송장번호 패턴 매칭 (609로 시작하는 13자리에 집중)
+                # 송장번호 패턴 매칭 (다양한 형식 지원)
                 # 하이픈, 공백, 다양한 변형 모두 지원
                 patterns = [
-                    # 609로 시작하는 5-4-4 형식 (최우선)
-                    r'(609\d{2}[-–—\s]+\d{4}[-–—\s]+\d{4})',  # 60914 - 8682 - 2638
-                    r'(609\d{2}\s*[-–—]\s*\d{4}\s*[-–—]\s*\d{4})',  # 공백 포함 변형
+                    # 등기번호: 패턴 (최우선 - 명시적 표시)
                     r'등기번호[:\s\-]*([0-9]{5}[-–—\s]{0,2}\d{4}[-–—\s]{0,2}\d{4})',  # "등기번호:" 패턴
+                    r'송장번호[:\s\-]*([0-9]{5}[-–—\s]{0,2}\d{4}[-–—\s]{0,2}\d{4})',  # "송장번호:" 패턴
                     
-                    # 609로 시작하는 연속 13자리
-                    r'\b(609\d{10})\b',                        # 6091486822638
-                    r'(609\d{10})',                            # 단어 경계 없이
-                    
-                    # 일반 5-4-4 형식
+                    # 5-4-4 형식 (하이픈 포함) - 일반적인 형식
                     r'(\d{5}[-–—\s]+\d{4}[-–—\s]+\d{4})',     # 모든 하이픈 변형
                     r'(\d{5}\s*[-–—]\s*\d{4}\s*[-–—]\s*\d{4})',  # 공백 포함
                     
-                    # 일반 13자리
-                    r'\b(\d{13})\b',
-                    r'(\d{13})',
+                    # 13자리 연속 숫자 (일반적인 송장번호 길이)
+                    r'\b(\d{13})\b',                           # 단어 경계 포함
+                    r'(?<!\d)(\d{13})(?!\d)',                  # 앞뒤 숫자 제외
                     
-                    # 12자리
+                    # 12자리 연속 숫자
                     r'\b(\d{12})\b',
+                    r'(?<!\d)(\d{12})(?!\d)',
+                    
+                    # 11자리 연속 숫자
+                    r'\b(\d{11})\b',
+                    r'(?<!\d)(\d{11})(?!\d)',
                 ]
                 
                 # 디버깅: 사용할 패턴 로그
@@ -141,18 +141,18 @@ class PDFPrinter(QObject):
                                 # 원본 텍스트 보존
                                 original_text = text
                                 
-                                # 디버깅: 추출된 텍스트에서 609로 시작하는 패턴 찾기
+                                # 디버깅: 추출된 텍스트에서 송장번호 패턴 찾기
                                 text_sample = text.replace('\n', ' ').replace('\r', ' ')[:500]
                                 
-                                # 609로 시작하는 모든 숫자 조합 찾기
-                                tracking_candidates = re.findall(r'609\d+', original_text)
+                                # 13자리 숫자 패턴 찾기 (디버깅용)
+                                tracking_candidates = re.findall(r'\b\d{13}\b', original_text)
                                 if tracking_candidates:
-                                    self.print_success.emit(f"[페이지 {page_num + 1}] 609로 시작하는 숫자: {', '.join(tracking_candidates[:5])}")
+                                    self.print_success.emit(f"[페이지 {page_num + 1}] 13자리 숫자 발견: {', '.join(tracking_candidates[:5])}")
                                 
-                                # 하이픈/공백 포함 송장번호 패턴
-                                hyphen_patterns = re.findall(r'609\d{2}[-–—\s]+\d{4}[-–—\s]+\d{4}', original_text)
+                                # 하이픈/공백 포함 송장번호 패턴 (5-4-4 형식)
+                                hyphen_patterns = re.findall(r'\d{5}[-–—\s]+\d{4}[-–—\s]+\d{4}', original_text)
                                 if hyphen_patterns:
-                                    self.print_success.emit(f"[페이지 {page_num + 1}] ✓ 송장번호 하이픈 패턴: {', '.join(hyphen_patterns)}")
+                                    self.print_success.emit(f"[페이지 {page_num + 1}] ✓ 송장번호 하이픈 패턴: {', '.join(hyphen_patterns[:3])}")
                                 
                                 # "등기번호" 주변 패턴 처리
                                 special_patterns = re.findall(r'등기번호[:\s\-]*([0-9]{5}[-–—\s]{0,2}\d{4}[-–—\s]{0,2}\d{4})', original_text)
@@ -162,7 +162,7 @@ class PDFPrinter(QObject):
                                         text = text + f" {sp} "  # 패턴 탐색을 위해 텍스트에 추가
                                 
                                 # 전체 텍스트 샘플 (송장번호 위치 확인)
-                                if '609' in text_sample or '등기번호' in text_sample:
+                                if '등기번호' in text_sample or '송장번호' in text_sample or re.search(r'\d{5}[-–—\s]+\d{4}[-–—\s]+\d{4}', text_sample) or re.search(r'\b\d{13}\b', text_sample):
                                     self.print_success.emit(f"[페이지 {page_num + 1}] 텍스트: {text_sample}...")
                                 
                                 # 원본 텍스트에서 직접 패턴 매칭 (정규화 전)
@@ -505,18 +505,26 @@ class PDFPrinter(QObject):
             clip_rect = self._detect_content_rect(page)
             self.print_success.emit(f"클립 영역: {clip_rect}")
             
+            # 원본 페이지의 회전 정보 확인
+            original_rotation = page.rotation  # 0, 90, 180, 270
+            
             # 고해상도 렌더링
             dpi = 300
             zoom = dpi / 72
             mat = fitz.Matrix(zoom, zoom)
             pix = page.get_pixmap(matrix=mat, clip=clip_rect, alpha=False)
             
-            # 새 페이지 생성 (원본 크기 유지)
-            new_page = optimized_doc.new_page(width=original_rect.width, height=original_rect.height)
+            # 새 페이지 생성 (원본 크기 및 방향 유지)
+            # 회전이 90도 또는 270도면 가로/세로 교체
+            if original_rotation in [90, 270]:
+                new_page = optimized_doc.new_page(width=original_rect.height, height=original_rect.width)
+            else:
+                new_page = optimized_doc.new_page(width=original_rect.width, height=original_rect.height)
             
-            # 이미지를 삽입 (내용만 90도 회전)
-            target_rect = fitz.Rect(0, 0, original_rect.width, original_rect.height)
-            new_page.insert_image(target_rect, pixmap=pix, rotate=90, keep_proportion=True, overlay=True)
+            # 이미지를 삽입 (원본 방향 유지, 회전 없음)
+            target_rect = fitz.Rect(0, 0, new_page.rect.width, new_page.rect.height)
+            # rotate=0으로 변경하여 원본 방향 유지
+            new_page.insert_image(target_rect, pixmap=pix, rotate=0, keep_proportion=True, overlay=True)
             
             temp_path = self._temp_dir / f"{clean_tracking_no}.pdf"
             if temp_path.exists():
@@ -526,7 +534,7 @@ class PDFPrinter(QObject):
             optimized_doc.close()
             doc.close()
             
-            self.print_success.emit(f"✅ 라벨 PDF 생성 완료: {temp_path.name} (내용만 90도 회전)")
+            self.print_success.emit(f"✅ 라벨 PDF 생성 완료: {temp_path.name} (원본 방향 유지, 회전: {original_rotation}도)")
             return temp_path
             
         except Exception as e:

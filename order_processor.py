@@ -67,6 +67,9 @@ class OrderProcessor(QObject):
         self._is_processing: bool = False
         self._last_barcode: str = ""
         self._last_scan_time: float = 0
+        
+        # 우선순위 규칙 (기본값은 excel_loader에서 관리)
+        self._priority_rules: Optional[dict] = None
     
     @property
     def current_tracking_no(self) -> Optional[str]:
@@ -97,17 +100,35 @@ class OrderProcessor(QObject):
         self._last_barcode = barcode
         self._last_scan_time = current_time
         
-        # 송장번호 형식 감지 (609로 시작하는 13자리 숫자) → 무시
-        if barcode.startswith('609') and len(barcode) == 13 and barcode.isdigit():
-            event = ScanEvent(
-                timestamp=timestamp,
-                barcode=barcode,
-                tracking_no=None,
-                result=ScanResult.NOT_FOUND,
-                message=f"송장번호 스캔 무시: {barcode}"
-            )
-            self.log_message.emit(f"[정보] 송장번호 스캔 무시: {barcode}")
-            return event
+        # 송장번호 형식 감지 (13자리 또는 12자리 숫자) → 무시
+        # 송장번호는 보통 12-13자리 숫자이므로, 바코드 스캔과 구분하기 위해 무시
+        if barcode.isdigit() and (len(barcode) == 13 or len(barcode) == 12):
+            # 엑셀에 해당 송장번호가 실제로 있는지 확인
+            # 있으면 정상 처리, 없으면 송장번호 스캔으로 간주하여 무시
+            if self.excel.df is not None:
+                pending = self.excel.df[self.excel.df['used'] == 0]
+                if barcode not in pending['tracking_no'].values:
+                    # 엑셀에 없는 13자리 숫자는 송장번호 스캔으로 간주하여 무시
+                    event = ScanEvent(
+                        timestamp=timestamp,
+                        barcode=barcode,
+                        tracking_no=None,
+                        result=ScanResult.NOT_FOUND,
+                        message=f"송장번호 스캔 무시: {barcode}"
+                    )
+                    self.log_message.emit(f"[정보] 송장번호 스캔 무시: {barcode}")
+                    return event
+            else:
+                # 엑셀 미로드 시 13자리 숫자는 무시
+                event = ScanEvent(
+                    timestamp=timestamp,
+                    barcode=barcode,
+                    tracking_no=None,
+                    result=ScanResult.NOT_FOUND,
+                    message=f"송장번호 스캔 무시: {barcode}"
+                )
+                self.log_message.emit(f"[정보] 송장번호 스캔 무시: {barcode}")
+                return event
         
         self.log_message.emit(f"바코드 스캔: {barcode}")
         
@@ -138,9 +159,10 @@ class OrderProcessor(QObject):
                 self.log_message.emit(f"[경고] {event.message}")
                 return event
         else:
-            # 새 송장 검색 (우선순위 정렬됨)
+            # 새 송장 검색 (우선순위 엔진 사용)
             try:
-                candidates = self.excel.find_candidates(barcode)
+                # 우선순위 규칙 전달 (없으면 excel_loader의 기본 규칙 사용)
+                candidates = self.excel.find_candidates(barcode, self._priority_rules)
                 self.log_message.emit(f"[디버그] 후보 {len(candidates)}건 찾음")
             except Exception as e:
                 self.log_message.emit(f"[오류] 후보 검색 실패: {str(e)}")
@@ -206,13 +228,6 @@ class OrderProcessor(QObject):
             self._current_tracking_no = tracking_no
             self.ezauto.send_input(tracking_no, barcode)
             self.log_message.emit(f"[EzAuto] 송장번호 + 바코드 입력: {tracking_no} / {barcode}")
-            
-            # 새 송장 첫 스캔 시 PDF 즉시 출력!
-            self.log_message.emit(f"[출력] 송장 {tracking_no} PDF 출력 시작")
-            if self.pdf.print_pdf(tracking_no):
-                self.log_message.emit(f"[성공] PDF 출력 완료: {tracking_no}")
-            else:
-                self.log_message.emit(f"[오류] PDF 출력 실패: {tracking_no}")
         else:
             # 같은 송장: 바코드만 입력
             self.ezauto.send_barcode_only(barcode)
@@ -233,8 +248,15 @@ class OrderProcessor(QObject):
         
         # 9. 완료 확인
         if remaining == 0:
-            # 송장 완료! (PDF는 이미 첫 스캔 시 출력됨)
+            # 송장 완료! 스캔 완료 후 PDF 출력
             self.log_message.emit(f"[완료] 송장 {tracking_no} 구성 완료!")
+            
+            # PDF 출력 (스캔 완료 후)
+            self.log_message.emit(f"[출력] 송장 {tracking_no} PDF 출력 시작")
+            if self.pdf.print_pdf(tracking_no):
+                self.log_message.emit(f"[성공] PDF 출력 완료: {tracking_no}")
+            else:
+                self.log_message.emit(f"[오류] PDF 출력 실패: {tracking_no}")
             
             # 완료 신호음 🎵
             play_complete_sound()
@@ -296,4 +318,15 @@ class OrderProcessor(QObject):
         """현재 tracking_no 초기화"""
         self._current_tracking_no = None
         self.ui_update_required.emit()
+    
+    def set_priority_rules(self, rules: dict):
+        """
+        우선순위 규칙 설정
+        
+        Args:
+            rules: 우선순위 규칙 딕셔너리
+        """
+        self._priority_rules = rules
+        # excel_loader에도 전달
+        self.excel.set_priority_rules(rules)
 

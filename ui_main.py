@@ -10,7 +10,8 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QTextEdit, QPushButton,
     QLabel, QLineEdit, QFileDialog, QGroupBox, QSplitter,
     QHeaderView, QMessageBox, QFrame, QCheckBox, QDialog,
-    QScrollArea, QGridLayout
+    QScrollArea, QGridLayout, QListWidget, QListWidgetItem,
+    QRadioButton, QButtonGroup
 )
 from PySide6.QtCore import Qt, Slot, QTimer, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QFont, QColor, QPalette, QIcon
@@ -197,6 +198,10 @@ class MainWindow(QMainWindow):
             self.pdf_printer
         )
         
+        # 우선순위 규칙 초기화 (기본값: 단품 우선)
+        from priority_engine import get_default_rules
+        self.processor.set_priority_rules(get_default_rules())
+        
         # UI 초기화
         self._init_ui()
         self._connect_signals()
@@ -222,18 +227,22 @@ class MainWindow(QMainWindow):
         top_group = self._create_top_section()
         main_layout.addWidget(top_group)
         
-        # === 중간: 스플리터 (테이블들 + 로그) ===
+        # === 중간: 스플리터 (테이블들 + 우선순위 설정 + 로그) ===
         splitter = QSplitter(Qt.Vertical)
         
         # 테이블 영역
         tables_widget = self._create_tables_section()
         splitter.addWidget(tables_widget)
         
+        # 우선순위 설정 영역 (우선순위 설정 + 우선 송장 관리)
+        priority_section = self._create_priority_section()
+        splitter.addWidget(priority_section)
+        
         # 로그 영역
         log_group = self._create_log_section()
         splitter.addWidget(log_group)
         
-        splitter.setSizes([500, 200])
+        splitter.setSizes([400, 200, 200])
         main_layout.addWidget(splitter, 1)
         
         # === 하단: 상태바 ===
@@ -315,6 +324,179 @@ class MainWindow(QMainWindow):
         
         # 오른쪽 여백 (창 최대화 시 벌어짐 방지)
         layout.addStretch()
+        
+        return group
+    
+    def _create_priority_section(self) -> QWidget:
+        """우선순위 설정 섹션 (우선순위 설정 + 우선 송장 관리)"""
+        widget = QWidget()
+        layout = QHBoxLayout(widget)
+        layout.setSpacing(10)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        # 우선순위 설정 패널
+        priority_group = self._create_priority_panel()
+        layout.addWidget(priority_group, 1)
+        
+        # 우선 송장 추가 패널
+        priority_tracking_group = self._create_priority_tracking_panel()
+        layout.addWidget(priority_tracking_group, 1)
+        
+        return widget
+    
+    def _create_priority_panel(self) -> QGroupBox:
+        """우선순위 설정 패널"""
+        group = QGroupBox("우선순위 설정")
+        layout = QVBoxLayout(group)
+        layout.setSpacing(8)
+        layout.setContentsMargins(8, 15, 8, 8)
+        
+        # 상호 배타적 옵션을 라디오 버튼으로 구성
+        grid = QGridLayout()
+        grid.setSpacing(8)
+        
+        # 1. 단품/조합 선택 (라디오 버튼 그룹)
+        single_combo_group = QButtonGroup(group)
+        single_combo_layout = QHBoxLayout()
+        single_combo_layout.addWidget(QLabel("품목 유형:"))
+        
+        self.priority_single_radio = QRadioButton("단품 우선")
+        self.priority_single_radio.setChecked(True)  # 기본값: 단품 우선
+        self.priority_single_radio.toggled.connect(self._on_priority_changed)
+        single_combo_group.addButton(self.priority_single_radio, 0)
+        single_combo_layout.addWidget(self.priority_single_radio)
+        
+        self.priority_combo_radio = QRadioButton("조합 우선")
+        self.priority_combo_radio.setChecked(False)
+        self.priority_combo_radio.toggled.connect(self._on_priority_changed)
+        single_combo_group.addButton(self.priority_combo_radio, 1)
+        single_combo_layout.addWidget(self.priority_combo_radio)
+        
+        single_combo_layout.addStretch()
+        grid.addLayout(single_combo_layout, 0, 0, 1, 2)
+        
+        # 2. 수량 선택 (라디오 버튼 그룹)
+        qty_group = QButtonGroup(group)
+        qty_layout = QHBoxLayout()
+        qty_layout.addWidget(QLabel("수량 기준:"))
+        
+        self.priority_small_qty_radio = QRadioButton("소량 우선")
+        self.priority_small_qty_radio.setChecked(False)
+        self.priority_small_qty_radio.toggled.connect(self._on_priority_changed)
+        qty_group.addButton(self.priority_small_qty_radio, 0)
+        qty_layout.addWidget(self.priority_small_qty_radio)
+        
+        self.priority_large_qty_radio = QRadioButton("대량 우선")
+        self.priority_large_qty_radio.setChecked(False)
+        self.priority_large_qty_radio.toggled.connect(self._on_priority_changed)
+        qty_group.addButton(self.priority_large_qty_radio, 1)
+        qty_layout.addWidget(self.priority_large_qty_radio)
+        
+        # 선택 안 함 옵션 추가
+        self.priority_no_qty_radio = QRadioButton("수량 무관")
+        self.priority_no_qty_radio.setChecked(True)  # 기본값: 수량 무관
+        self.priority_no_qty_radio.toggled.connect(self._on_priority_changed)
+        qty_group.addButton(self.priority_no_qty_radio, 2)
+        qty_layout.addWidget(self.priority_no_qty_radio)
+        
+        qty_layout.addStretch()
+        grid.addLayout(qty_layout, 1, 0, 1, 2)
+        
+        # 3. 주문 시간 선택 (라디오 버튼 그룹)
+        order_time_group = QButtonGroup(group)
+        order_time_layout = QHBoxLayout()
+        order_time_layout.addWidget(QLabel("주문 시간:"))
+        
+        self.priority_old_order_radio = QRadioButton("오래된 주문 우선")
+        self.priority_old_order_radio.setChecked(False)
+        self.priority_old_order_radio.toggled.connect(self._on_priority_changed)
+        order_time_group.addButton(self.priority_old_order_radio, 0)
+        order_time_layout.addWidget(self.priority_old_order_radio)
+        
+        self.priority_new_order_radio = QRadioButton("최신 주문 우선")
+        self.priority_new_order_radio.setChecked(False)
+        self.priority_new_order_radio.toggled.connect(self._on_priority_changed)
+        order_time_group.addButton(self.priority_new_order_radio, 1)
+        order_time_layout.addWidget(self.priority_new_order_radio)
+        
+        # 선택 안 함 옵션 추가
+        self.priority_no_time_radio = QRadioButton("시간 무관")
+        self.priority_no_time_radio.setChecked(True)  # 기본값: 시간 무관
+        self.priority_no_time_radio.toggled.connect(self._on_priority_changed)
+        order_time_group.addButton(self.priority_no_time_radio, 2)
+        order_time_layout.addWidget(self.priority_no_time_radio)
+        
+        order_time_layout.addStretch()
+        grid.addLayout(order_time_layout, 2, 0, 1, 2)
+        
+        layout.addLayout(grid)
+        
+        # 프리셋 버튼 영역
+        preset_layout = QHBoxLayout()
+        preset_layout.setSpacing(5)
+        
+        self.preset_default_btn = QPushButton("📌 기본(단품 우선)")
+        self.preset_default_btn.setMaximumHeight(30)
+        self.preset_default_btn.clicked.connect(lambda: self._apply_preset("default"))
+        preset_layout.addWidget(self.preset_default_btn)
+        
+        self.preset_backlog_btn = QPushButton("📋 밀린 주문 정리")
+        self.preset_backlog_btn.setMaximumHeight(30)
+        self.preset_backlog_btn.clicked.connect(lambda: self._apply_preset("backlog"))
+        preset_layout.addWidget(self.preset_backlog_btn)
+        
+        self.preset_bulk_btn = QPushButton("📦 대량 소화")
+        self.preset_bulk_btn.setMaximumHeight(30)
+        self.preset_bulk_btn.clicked.connect(lambda: self._apply_preset("bulk"))
+        preset_layout.addWidget(self.preset_bulk_btn)
+        
+        layout.addLayout(preset_layout)
+        
+        # 초기 우선순위 규칙 적용
+        self._apply_priority_rules()
+        
+        return group
+    
+    def _create_priority_tracking_panel(self) -> QGroupBox:
+        """우선 송장 추가 패널 (방식 B: 직접 입력)"""
+        group = QGroupBox("⭐ 우선 송장 관리")
+        layout = QVBoxLayout(group)
+        layout.setSpacing(5)
+        layout.setContentsMargins(8, 15, 8, 8)
+        
+        # 입력 영역
+        input_layout = QHBoxLayout()
+        
+        self.priority_tracking_input = QLineEdit()
+        self.priority_tracking_input.setPlaceholderText("송장번호 입력/붙여넣기 (여러 개: 줄바꿈 또는 쉼표 구분)")
+        self.priority_tracking_input.returnPressed.connect(self._on_add_priority_tracking)
+        input_layout.addWidget(self.priority_tracking_input)
+        
+        add_btn = QPushButton("추가")
+        add_btn.clicked.connect(self._on_add_priority_tracking)
+        add_btn.setMaximumWidth(60)
+        input_layout.addWidget(add_btn)
+        
+        remove_btn = QPushButton("해제")
+        remove_btn.clicked.connect(self._on_remove_priority_tracking)
+        remove_btn.setMaximumWidth(60)
+        input_layout.addWidget(remove_btn)
+        
+        layout.addLayout(input_layout)
+        
+        # 우선 송장 목록
+        list_label = QLabel("우선 송장 목록:")
+        layout.addWidget(list_label)
+        
+        self.priority_tracking_list = QListWidget()
+        self.priority_tracking_list.setMaximumHeight(100)
+        self.priority_tracking_list.setSelectionMode(QListWidget.SingleSelection)
+        layout.addWidget(self.priority_tracking_list)
+        
+        # 설명 텍스트
+        help_label = QLabel("💡 여러 송장번호를 한 번에 입력 가능 (줄바꿈 또는 쉼표로 구분)")
+        help_label.setStyleSheet("font-size: 9px; color: #666;")
+        layout.addWidget(help_label)
         
         return group
     
@@ -561,6 +743,7 @@ class MainWindow(QMainWindow):
         self.excel_loader.data_loaded.connect(self._on_data_loaded)
         self.excel_loader.data_updated.connect(self._on_data_updated)
         self.excel_loader.error_occurred.connect(self._on_error)
+        self.excel_loader.priority_cleared.connect(self._on_priority_cleared)
         
         # Scanner 시그널
         self.scanner.barcode_scanned.connect(self._on_barcode_scanned)
@@ -992,6 +1175,234 @@ class MainWindow(QMainWindow):
         self._add_log(f"PDF 출력: {'활성' if checked else '비활성'}")
     
     @Slot()
+    def _on_priority_changed(self):
+        """우선순위 설정 변경 (라디오 버튼 자동 상호 배타적)"""
+        self._apply_priority_rules()
+    
+    def _apply_preset(self, preset_name: str):
+        """
+        프리셋 적용
+        
+        Args:
+            preset_name: 프리셋 이름 ("default", "backlog", "bulk")
+        """
+        from priority_engine import get_preset_rules
+        
+        # 프리셋 규칙 가져오기
+        rules = get_preset_rules(preset_name)
+        
+        # 라디오 버튼 UI 상태 업데이트 (시그널 차단하여 무한 루프 방지)
+        if hasattr(self, 'priority_single_radio'):
+            self.priority_single_radio.blockSignals(True)
+            self.priority_combo_radio.blockSignals(True)
+            self.priority_small_qty_radio.blockSignals(True)
+            self.priority_large_qty_radio.blockSignals(True)
+            self.priority_no_qty_radio.blockSignals(True)
+            self.priority_old_order_radio.blockSignals(True)
+            self.priority_new_order_radio.blockSignals(True)
+            self.priority_no_time_radio.blockSignals(True)
+            
+            self.priority_single_radio.setChecked(rules["single_first"])
+            self.priority_combo_radio.setChecked(rules["combo_first"])
+            self.priority_small_qty_radio.setChecked(rules["small_qty_first"])
+            self.priority_large_qty_radio.setChecked(rules["large_qty_first"])
+            # 수량 무관: 둘 다 False일 때
+            if not rules["small_qty_first"] and not rules["large_qty_first"]:
+                self.priority_no_qty_radio.setChecked(True)
+            self.priority_old_order_radio.setChecked(rules["old_order_first"])
+            self.priority_new_order_radio.setChecked(rules["new_order_first"])
+            # 시간 무관: 둘 다 False일 때
+            if not rules["old_order_first"] and not rules["new_order_first"]:
+                self.priority_no_time_radio.setChecked(True)
+            
+            self.priority_single_radio.blockSignals(False)
+            self.priority_combo_radio.blockSignals(False)
+            self.priority_small_qty_radio.blockSignals(False)
+            self.priority_large_qty_radio.blockSignals(False)
+            self.priority_no_qty_radio.blockSignals(False)
+            self.priority_old_order_radio.blockSignals(False)
+            self.priority_new_order_radio.blockSignals(False)
+            self.priority_no_time_radio.blockSignals(False)
+        
+        # 규칙 적용
+        self._apply_priority_rules()
+        
+        # 프리셋 이름 매핑
+        preset_names = {
+            "default": "기본(단품 우선)",
+            "backlog": "밀린 주문 정리",
+            "bulk": "대량 소화"
+        }
+        self._add_log(f"프리셋 적용: {preset_names.get(preset_name, preset_name)}")
+    
+    def _apply_priority_rules(self):
+        """현재 UI 설정을 기반으로 우선순위 규칙 적용"""
+        # 라디오 버튼에서 값 읽기
+        if hasattr(self, 'priority_single_radio'):
+            rules = {
+                "single_first": self.priority_single_radio.isChecked(),
+                "combo_first": self.priority_combo_radio.isChecked(),
+                "small_qty_first": self.priority_small_qty_radio.isChecked(),
+                "large_qty_first": self.priority_large_qty_radio.isChecked(),
+                "old_order_first": self.priority_old_order_radio.isChecked(),
+                "new_order_first": self.priority_new_order_radio.isChecked(),
+                "manual_priority": True  # ⭐ 고정 기능 항상 활성화
+            }
+        else:
+            # 초기화 중일 때는 기본값 사용
+            rules = {
+                "single_first": True,
+                "combo_first": False,
+                "small_qty_first": False,
+                "large_qty_first": False,
+                "old_order_first": False,
+                "new_order_first": False,
+                "manual_priority": True
+            }
+        
+        # processor에 규칙 전달
+        self.processor.set_priority_rules(rules)
+        
+        # 로그 출력 (변경사항만, manual_priority 제외)
+        # log_text가 초기화되지 않았을 수 있으므로 안전하게 처리
+        if hasattr(self, 'log_text'):
+            active_rules = [k for k, v in rules.items() if v and k != "manual_priority"]
+            if active_rules:
+                self._add_log(f"우선순위 규칙 적용: {', '.join(active_rules)}")
+    
+    def _on_toggle_tracking_priority(self, tracking_no: str, is_priority: bool):
+        """
+        송장 ⭐ 고정 상태 토글 (방식 A: 카드의 ⭐ 버튼)
+        
+        Args:
+            tracking_no: 송장번호
+            is_priority: True면 ⭐ 고정, False면 해제
+        """
+        self._set_tracking_priority(tracking_no, is_priority)
+        
+        # UI 업데이트 (⭐ 버튼 상태 및 목록 반영)
+        self._update_summary_table()
+        self._update_priority_tracking_list()
+        
+        # 로그 출력
+        status = "⭐ 고정" if is_priority else "⭐ 해제"
+        self._add_log(f"송장 {tracking_no} {status}")
+    
+    def _set_tracking_priority(self, tracking_no: str, is_priority: bool):
+        """
+        송장 ⭐ 고정 상태 설정 (공통 함수)
+        
+        Args:
+            tracking_no: 송장번호
+            is_priority: True면 ⭐ 고정, False면 해제
+        """
+        self.excel_loader.set_tracking_priority(tracking_no, is_priority)
+        
+        # 메타데이터 캐시 갱신 (다음 매칭부터 적용)
+        if self.excel_loader._metadata_cache:
+            # 해당 송장의 메타데이터만 갱신
+            if tracking_no in self.excel_loader._metadata_cache:
+                meta = self.excel_loader._metadata_cache[tracking_no]
+                meta["is_priority"] = is_priority
+    
+    def _on_add_priority_tracking(self):
+        """우선 송장 추가 (방식 B: 직접 입력)"""
+        input_text = self.priority_tracking_input.text().strip()
+        if not input_text:
+            return
+        
+        # 여러 개 입력 지원: 줄바꿈 또는 쉼표로 구분
+        tracking_nos = []
+        for line in input_text.replace(',', '\n').split('\n'):
+            tn = line.strip()
+            if tn:
+                tracking_nos.append(tn)
+        
+        if not tracking_nos:
+            return
+        
+        # 각 송장번호 추가
+        added_count = 0
+        not_found = []
+        
+        for tracking_no in tracking_nos:
+            # 송장번호 존재 확인
+            if self.excel_loader.df is None:
+                QMessageBox.warning(self, "경고", "먼저 엑셀 파일을 불러오세요.")
+                return
+            
+            # used=0인 송장만 확인 (처리되지 않은 송장)
+            pending = self.excel_loader.df[self.excel_loader.df['used'] == 0]
+            if tracking_no not in pending['tracking_no'].values:
+                not_found.append(tracking_no)
+                continue
+            
+            # 이미 우선 송장인지 확인
+            if not self.excel_loader.get_tracking_priority(tracking_no):
+                self._set_tracking_priority(tracking_no, True)
+                added_count += 1
+        
+        # 입력창 초기화
+        self.priority_tracking_input.clear()
+        
+        # 결과 메시지
+        if added_count > 0:
+            self._add_log(f"⭐ 우선 송장 {added_count}개 추가됨")
+            self._update_priority_tracking_list()
+            self._update_summary_table()
+        
+        if not_found:
+            not_found_str = ', '.join(not_found[:5])
+            if len(not_found) > 5:
+                not_found_str += f" 외 {len(not_found) - 5}개"
+            QMessageBox.warning(
+                self, "경고",
+                f"다음 송장번호를 찾을 수 없거나 이미 처리되었습니다:\n{not_found_str}"
+            )
+    
+    def _on_remove_priority_tracking(self):
+        """우선 송장 해제 (방식 B: 목록에서 선택 후 해제)"""
+        selected_items = self.priority_tracking_list.selectedItems()
+        if not selected_items:
+            QMessageBox.information(self, "알림", "해제할 송장을 선택하세요.")
+            return
+        
+        removed_count = 0
+        for item in selected_items:
+            tracking_no = item.text()
+            if self.excel_loader.get_tracking_priority(tracking_no):
+                self._set_tracking_priority(tracking_no, False)
+                removed_count += 1
+        
+        if removed_count > 0:
+            self._add_log(f"⭐ 우선 송장 {removed_count}개 해제됨")
+            self._update_priority_tracking_list()
+            self._update_summary_table()
+    
+    def _update_priority_tracking_list(self):
+        """우선 송장 목록 업데이트"""
+        if not hasattr(self, 'priority_tracking_list'):
+            return
+        
+        self.priority_tracking_list.clear()
+        
+        if self.excel_loader.df is None:
+            return
+        
+        # 모든 우선 송장 조회
+        all_tracking_nos = self.excel_loader.get_all_tracking_numbers()
+        priority_tracking_nos = [
+            tn for tn in all_tracking_nos
+            if self.excel_loader.get_tracking_priority(tn)
+        ]
+        
+        # 목록에 추가 (정렬)
+        for tracking_no in sorted(priority_tracking_nos):
+            item = QListWidgetItem(f"⭐ {tracking_no}")
+            item.setData(Qt.UserRole, tracking_no)  # tracking_no 저장
+            self.priority_tracking_list.addItem(item)
+    
+    @Slot()
     def _on_manual_scan(self):
         """수동 바코드 스캔"""
         barcode = self.manual_barcode_edit.text().strip()
@@ -1031,11 +1442,21 @@ class MainWindow(QMainWindow):
         self._add_log(f"<b style='color:#4CAF50'>✓ 송장 {tracking_no} 완료!</b>", html=True)
         self._update_status_count()
     
+    @Slot(str)
+    def _on_priority_cleared(self, tracking_no: str):
+        """완료된 우선 송장 자동 해제 (시그널 핸들러)"""
+        self._add_log(f"완료된 우선 송장 자동 해제: {tracking_no}")
+        # UI 업데이트 (우선 송장 목록 및 카드 ⭐ 상태)
+        self._update_priority_tracking_list()
+        self._update_summary_table()
+    
     @Slot()
     def _on_data_loaded(self):
         """데이터 로드 완료"""
         self._update_tables()
         self._update_status_count()
+        # 우선 송장 목록 업데이트
+        self._update_priority_tracking_list()
     
     @Slot()
     def _on_data_updated(self):
@@ -1113,8 +1534,22 @@ class MainWindow(QMainWindow):
             empty_label.setStyleSheet("font-size: 16px; color: #4CAF50; padding: 20px;")
             self.summary_grid.addWidget(empty_label)
         else:
-            combo_data = self._get_summary_combo_data(pending)
-            for combo_info in combo_data:
+            # 각 송장별로 별도 카드 생성 (⭐ 기능을 위해)
+            tracking_groups = pending.groupby('tracking_no')
+            combo_cards = []
+            
+            for tracking_no, group in tracking_groups:
+                # 각 송장에 대한 카드 정보 생성
+                combo_info = self._create_combo_info_for_tracking(tracking_no, group)
+                combo_cards.append(combo_info)
+            
+            # ⭐ 고정 송장을 먼저 정렬 (우선순위 반영)
+            combo_cards.sort(key=lambda x: (
+                not self.excel_loader.get_tracking_priority(x['tracking_nos'][0]),  # ⭐ 고정이 먼저
+                -x['count']  # 그 다음 개수 내림차순
+            ))
+            
+            for combo_info in combo_cards:
                 card = self._create_summary_card(combo_info)
                 self.summary_grid.addWidget(card)
             self.summary_grid.addStretch()
@@ -1218,8 +1653,44 @@ class MainWindow(QMainWindow):
         
         return card
     
+    def _create_combo_info_for_tracking(self, tracking_no: str, group: pd.DataFrame) -> dict:
+        """
+        특정 송장에 대한 카드 정보 생성
+        
+        Args:
+            tracking_no: 송장번호
+            group: 해당 송장의 DataFrame 그룹
+        
+        Returns:
+            카드 정보 딕셔너리
+        """
+        barcodes = sorted(group['barcode'].unique())
+        products = []
+        
+        for _, row in group.iterrows():
+            product_name = str(row['product_name']) if pd.notna(row['product_name']) else ''
+            option_name = str(row['option_name']) if pd.notna(row['option_name']) else ''
+            qty = int(row['qty']) if pd.notna(row['qty']) else 1
+            
+            product_info = product_name
+            if option_name and option_name != 'nan':
+                product_info += f" ({option_name})"
+            
+            # 수량 뒤에 표시: 1개, 2개, 3개...
+            product_info += f" {qty}개"
+            
+            if product_info and product_info not in products:
+                products.append(product_info)
+        
+        return {
+            'count': 1,  # 송장당 1개
+            'products': products,
+            'barcodes': barcodes,
+            'tracking_nos': [tracking_no]  # 단일 송장
+        }
+    
     def _get_summary_combo_data(self, pending):
-        """구성별 데이터 추출 (수량 포함)"""
+        """구성별 데이터 추출 (수량 포함) - 기존 함수 유지 (다른 곳에서 사용 가능)"""
         tracking_groups = pending.groupby('tracking_no')
         combo_counts = {}
         
@@ -1230,7 +1701,8 @@ class MainWindow(QMainWindow):
                 combo_counts[barcodes] = {
                     'count': 0,
                     'products': [],
-                    'barcodes': list(barcodes)
+                    'barcodes': list(barcodes),
+                    'tracking_nos': []  # 같은 구성의 송장번호 리스트
                 }
                 for _, row in group.iterrows():
                     product_name = str(row['product_name']) if pd.notna(row['product_name']) else ''
@@ -1248,16 +1720,20 @@ class MainWindow(QMainWindow):
                         combo_counts[barcodes]['products'].append(product_info)
             
             combo_counts[barcodes]['count'] += 1
+            if tracking_no not in combo_counts[barcodes]['tracking_nos']:
+                combo_counts[barcodes]['tracking_nos'].append(tracking_no)
         
         return sorted(combo_counts.values(), key=lambda x: -x['count'])
     
     def _create_summary_card(self, combo_info):
-        """요약 카드 생성 (가로 나열, 전체 품목 표시)"""
+        """요약 카드 생성 (가로 나열, 전체 품목 표시) + ⭐ 토글 버튼"""
         card = QFrame()
         card.setFrameShape(QFrame.StyledPanel)
         
         # 바코드 정보 저장 (반짝임 효과용)
         card._barcodes = combo_info.get('barcodes', [])
+        # tracking_no 리스트 저장 (⭐ 토글용)
+        card._tracking_nos = combo_info.get('tracking_nos', [])
         
         count = combo_info['count']
         if count >= 10:
@@ -1305,6 +1781,30 @@ class MainWindow(QMainWindow):
         prod_label.setWordWrap(True)
         prod_label.setStyleSheet("font-size: 11px; color: #333; line-height: 1.4;")
         layout.addWidget(prod_label, 1)
+        
+        # ⭐ 토글 버튼 (여러 송장이 있으면 첫 번째 송장 기준)
+        # 실제로는 각 송장별로 별도 카드가 생성되므로 첫 번째 송장만 사용
+        if card._tracking_nos:
+            tracking_no = card._tracking_nos[0]
+            is_priority = self.excel_loader.get_tracking_priority(tracking_no)
+            
+            star_btn = QPushButton("⭐" if is_priority else "☆")
+            star_btn.setCheckable(True)
+            star_btn.setChecked(is_priority)
+            star_btn.setMaximumWidth(30)
+            star_btn.setMaximumHeight(30)
+            star_btn.setStyleSheet("""
+                QPushButton {
+                    border: none;
+                    background-color: transparent;
+                    font-size: 16px;
+                }
+                QPushButton:checked {
+                    color: #FFD700;
+                }
+            """)
+            star_btn.clicked.connect(lambda checked, tn=tracking_no: self._on_toggle_tracking_priority(tn, checked))
+            layout.addWidget(star_btn)
         
         return card
     
@@ -1374,6 +1874,10 @@ class MainWindow(QMainWindow):
     
     def _add_log(self, message: str, html: bool = False):
         """로그 추가"""
+        # log_text가 초기화되지 않았으면 무시
+        if not hasattr(self, 'log_text') or self.log_text is None:
+            return
+        
         timestamp = get_timestamp()
         if html:
             self.log_text.append(f"[{timestamp}] {message}")
