@@ -627,12 +627,21 @@ class MainWindow(QMainWindow):
             
             # 자동 인덱싱
             self._add_log("PDF 파일 스캔 중...")
-            count = self.pdf_printer.build_tracking_index()
+            
+            # 엑셀에서 송장번호 목록 가져오기 (이미지 PDF의 경우 사용)
+            excel_tracking_numbers = None
+            if self.excel_loader.df is not None and 'tracking_no' in self.excel_loader.df.columns:
+                excel_tracking_numbers = self.excel_loader.df['tracking_no'].unique().tolist()
+            
+            count = self.pdf_printer.build_tracking_index(excel_tracking_numbers)
             
             if count > 0:
                 self._add_log(f"<b style='color:#4CAF50'>✓ PDF 스캔 완료: {count}개 송장번호 발견</b>", html=True)
             else:
-                self._add_log("[경고] PDF에서 송장번호를 찾지 못했습니다")
+                if excel_tracking_numbers:
+                    self._add_log("[경고] PDF에서 송장번호를 찾지 못했습니다. 이미지 기반 PDF일 수 있습니다.")
+                else:
+                    self._add_log("[경고] PDF에서 송장번호를 찾지 못했습니다. 엑셀 파일을 먼저 로드하면 자동 매핑됩니다.")
     
     @Slot()
     def _on_load_excel(self):
