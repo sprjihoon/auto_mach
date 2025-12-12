@@ -18,6 +18,7 @@ import pandas as pd
 
 from models import ScanResult, ScanEvent
 from excel_loader import ExcelLoader
+from normalize_pdf import normalize_pdf
 
 
 class SummaryDialog(QDialog):
@@ -622,9 +623,28 @@ class MainWindow(QMainWindow):
             "PDF Files (*.pdf);;All Files (*)"
         )
         if file_path:
-            self.pdf_path_edit.setText(file_path)
-            self.pdf_printer.set_pdf_file(file_path)
-            self._add_log(f"PDF 파일 설정: {file_path}")
+            # PDF 크롭 처리
+            try:
+                import tempfile
+                temp_dir = Path(tempfile.gettempdir()) / "auto_mach_labels"
+                temp_dir.mkdir(exist_ok=True)
+                
+                # 크롭된 PDF 저장 경로
+                original_path = Path(file_path)
+                cropped_path = temp_dir / f"cropped_{original_path.stem}.pdf"
+                
+                self._add_log("PDF 크롭 처리 중... (107mm × 168mm)")
+                normalize_pdf(file_path, str(cropped_path))
+                self._add_log(f"✓ PDF 크롭 완료: {cropped_path}")
+                
+                # 크롭된 PDF 사용
+                self.pdf_path_edit.setText(file_path)  # 원본 경로 표시
+                self.pdf_printer.set_pdf_file(str(cropped_path))  # 크롭된 파일 사용
+                self._add_log(f"PDF 파일 설정: {file_path} (크롭된 버전 사용)")
+            except Exception as e:
+                self._add_log(f"[오류] PDF 크롭 실패: {str(e)}. 원본 파일 사용.")
+                self.pdf_path_edit.setText(file_path)
+                self.pdf_printer.set_pdf_file(file_path)
             
             # 자동 인덱싱
             self._add_log("PDF 파일 스캔 중...")
