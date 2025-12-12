@@ -41,12 +41,16 @@ def _extract_text_from_pdf(pdf_path: Path) -> Tuple[str, Dict[str, str]]:
         return "", found_numbers
     
     # 송장번호 패턴 (5-4-4 형식, 11-13자리 숫자)
+    # 하이픈, 공백, 다양한 하이픈 문자 지원
     tracking_patterns = [
-        r'\b(\d{5}[-–—\s]\d{4}[-–—\s]\d{4})\b',  # 60914-8682-2638 형식
-        r'\b(\d{5}-\d{4}-\d{4})\b',  # 일반 하이픈
-        r'\b(\d{13})\b',  # 13자리
-        r'\b(\d{12})\b',  # 12자리
-        r'\b(\d{11})\b',  # 11자리
+        r'(\d{5}[-–—\s]+\d{4}[-–—\s]+\d{4})',  # 60914-8682-2638 형식 (하이픈/공백 유연)
+        r'(\d{5}[-–—]\d{4}[-–—]\d{4})',  # 하이픈만
+        r'(\d{5}\s+\d{4}\s+\d{4})',  # 공백만
+        r'등기번호[:\s\-]*(\d{5}[-–—\s]?\d{4}[-–—\s]?\d{4})',  # "등기번호: 60914-8682-2638"
+        r'송장번호[:\s\-]*(\d{5}[-–—\s]?\d{4}[-–—\s]?\d{4})',  # "송장번호: 60914-8682-2638"
+        r'\b(\d{13})\b',  # 13자리 연속
+        r'\b(\d{12})\b',  # 12자리 연속
+        r'\b(\d{11})\b',  # 11자리 연속
     ]
     
     # 주문번호 패턴 (날짜-순서 형식 등)
@@ -172,14 +176,18 @@ def _search_pdf_file(args: Tuple[Path, str]) -> Optional[Dict]:
     try:
         text, found_numbers = _extract_text_from_pdf(pdf_path)
         
-        # 검색값 정규화 (하이픈, 공백 제거)
-        search_clean = re.sub(r'[-–—\s]', '', search_value)
+        if not found_numbers:
+            return None
         
-        # 송장번호 매칭 확인
+        # 검색값 정규화 (하이픈, 공백 제거)
+        search_clean = re.sub(r'[-–—\s]', '', str(search_value).strip())
+        search_original = str(search_value).strip()
+        
+        # 1. 정확한 매칭 (하이픈 제거 후 비교) - 가장 빠름
         for key, original in found_numbers.items():
             if key.startswith("tracking_"):
                 tracking_clean = key.replace("tracking_", "")
-                if tracking_clean == search_clean or tracking_clean.startswith(search_clean) or search_clean.startswith(tracking_clean):
+                if tracking_clean == search_clean:
                     return {
                         "pdf_path": str(pdf_path),
                         "tracking_no": tracking_clean,
@@ -187,11 +195,10 @@ def _search_pdf_file(args: Tuple[Path, str]) -> Optional[Dict]:
                         "type": "tracking"
                     }
         
-        # 주문번호 매칭 확인
         for key, original in found_numbers.items():
             if key.startswith("order_"):
                 order_clean = key.replace("order_", "")
-                if order_clean == search_clean or order_clean.startswith(search_clean) or search_clean.startswith(order_clean):
+                if order_clean == search_clean:
                     return {
                         "pdf_path": str(pdf_path),
                         "order_no": order_clean,
@@ -199,17 +206,69 @@ def _search_pdf_file(args: Tuple[Path, str]) -> Optional[Dict]:
                         "type": "order"
                     }
         
-        # 텍스트 직접 검색 (부분 일치)
-        if search_clean in text.replace("-", "").replace(" ", ""):
-            # 송장번호 추출 시도
-            for key, original in found_numbers.items():
-                if key.startswith("tracking_"):
+        # 2. 원본 형식 직접 비교 (하이픈 포함)
+        for key, original in found_numbers.items():
+            if key.startswith("tracking_"):
+                original_str = str(original).strip()
+                # 원본 형식 직접 비교
+                if original_str == search_original:
                     return {
                         "pdf_path": str(pdf_path),
                         "tracking_no": key.replace("tracking_", ""),
                         "original": original,
                         "type": "tracking"
                     }
+                # 원본 형식 정규화 후 비교
+                original_clean = re.sub(r'[-–—\s]', '', original_str)
+                if original_clean == search_clean:
+                    return {
+                        "pdf_path": str(pdf_path),
+                        "tracking_no": key.replace("tracking_", ""),
+                        "original": original,
+                        "type": "tracking"
+                    }
+        
+        for key, original in found_numbers.items():
+            if key.startswith("order_"):
+                original_str = str(original).strip()
+                # 원본 형식 직접 비교
+                if original_str == search_original:
+                    return {
+                        "pdf_path": str(pdf_path),
+                        "order_no": key.replace("order_", ""),
+                        "original": original,
+                        "type": "order"
+                    }
+                # 원본 형식 정규화 후 비교
+                original_clean = re.sub(r'[-–—\s]', '', original_str)
+                if original_clean == search_clean:
+                    return {
+                        "pdf_path": str(pdf_path),
+                        "order_no": key.replace("order_", ""),
+                        "original": original,
+                        "type": "order"
+                    }
+        
+        # 3. 텍스트에서 직접 검색 (하이픈 포함/제거 모두 시도)
+        if search_clean in text.replace("-", "").replace("–", "").replace("—", "").replace(" ", ""):
+            # 텍스트에서 직접 패턴 매칭 시도
+            for pattern in [
+                r'(\d{5}[-–—\s]+\d{4}[-–—\s]+\d{4})',
+                r'(\d{13})',
+                r'(\d{12})',
+                r'(\d{11})',
+            ]:
+                matches = re.findall(pattern, text)
+                for match in matches:
+                    match_clean = re.sub(r'[-–—\s]', '', str(match))
+                    if match_clean == search_clean:
+                        # tracking_no로 반환
+                        return {
+                            "pdf_path": str(pdf_path),
+                            "tracking_no": match_clean,
+                            "original": match,
+                            "type": "tracking"
+                        }
         
     except Exception as e:
         # 오류는 무시하고 계속 진행
@@ -218,7 +277,14 @@ def _search_pdf_file(args: Tuple[Path, str]) -> Optional[Dict]:
     return None
 
 
-def search_pdf_files(search_value: str, search_dirs: List[Path], max_workers: Optional[int] = None) -> Optional[Dict]:
+def search_pdf_files(
+    search_value: str,
+    search_dirs: List[Path],
+    max_workers: Optional[int] = None,
+    use_multicore: bool = True,
+    cancel_flag: Optional[object] = None,
+    progress_callback: Optional[callable] = None
+) -> Optional[Dict]:
     """
     여러 폴더에서 PDF 파일 검색 (멀티코어 활용)
     
@@ -226,31 +292,57 @@ def search_pdf_files(search_value: str, search_dirs: List[Path], max_workers: Op
         search_value: 검색할 송장번호 또는 주문번호
         search_dirs: 검색할 폴더 리스트
         max_workers: 최대 워커 수 (None이면 CPU 코어의 70%)
+        use_multicore: 멀티코어 사용 여부
+        cancel_flag: 취소 플래그 객체 (hasattr(cancel_flag, 'cancelled') and cancel_flag.cancelled이면 중단)
+        progress_callback: 진행 상황 콜백 함수 (message: str) -> None
     
     Returns:
         첫 번째 매칭 결과 또는 None
     """
     if not PDF_SUPPORT:
+        if progress_callback:
+            progress_callback("PDF 라이브러리가 설치되지 않았습니다.")
         return None
     
     # CPU 코어 수 확인 및 워커 수 결정
     cpu_count = multiprocessing.cpu_count()
-    if max_workers is None:
-        max_workers = max(1, int(cpu_count * 0.7))  # 70% 사용
+    if use_multicore:
+        if max_workers is None:
+            max_workers = max(1, int(cpu_count * 0.7))  # 70% 사용
+        if progress_callback:
+            progress_callback(f"멀티스레드 검색 시작: {max_workers}개 워커 (CPU 코어 {cpu_count}개 중 {max_workers}개 사용)")
+    else:
+        max_workers = 1  # 단일 스레드
+        if progress_callback:
+            progress_callback(f"단일스레드 검색 시작 (CPU 코어 {cpu_count}개 중 1개 사용)")
     
     # 모든 PDF 파일 수집
     pdf_files = []
     for search_dir in search_dirs:
         if search_dir.exists() and search_dir.is_dir():
-            pdf_files.extend(search_dir.glob("*.pdf"))
+            files = list(search_dir.glob("*.pdf"))
+            pdf_files.extend(files)
+            if progress_callback:
+                progress_callback(f"폴더 '{search_dir}'에서 {len(files)}개 PDF 파일 발견")
     
     if not pdf_files:
+        if progress_callback:
+            progress_callback(f"검색할 PDF 파일이 없습니다. (폴더: {[str(d) for d in search_dirs]})")
+        return None
+    
+    total_files = len(pdf_files)
+    if progress_callback:
+        progress_callback(f"총 {total_files}개 PDF 파일 검색 중... (검색값: {search_value})")
+    
+    # 취소 확인
+    if cancel_flag and hasattr(cancel_flag, 'cancelled') and cancel_flag.cancelled:
         return None
     
     # 멀티코어 검색 (ThreadPoolExecutor 사용 - Windows 호환성)
     # 첫 번째 매칭에서 즉시 종료하기 위해 as_completed 사용
-    executor_class = ThreadPoolExecutor if USE_THREADS else ProcessPoolExecutor
+    executor_class = ThreadPoolExecutor  # Windows에서는 항상 ThreadPoolExecutor 사용
     
+    checked_count = 0
     with executor_class(max_workers=max_workers) as executor:
         # 모든 작업 제출
         future_to_pdf = {
@@ -260,26 +352,56 @@ def search_pdf_files(search_value: str, search_dirs: List[Path], max_workers: Op
         
         # 첫 번째 결과를 찾으면 즉시 종료
         for future in as_completed(future_to_pdf):
+            checked_count += 1
+            
+            # 취소 확인
+            if cancel_flag and hasattr(cancel_flag, 'cancelled') and cancel_flag.cancelled:
+                # 모든 작업 취소
+                for f in future_to_pdf:
+                    f.cancel()
+                if progress_callback:
+                    progress_callback(f"검색 취소됨 ({checked_count}/{total_files} 파일 검사 완료)")
+                return None
+            
+            # 진행 상황 업데이트 (10개마다 또는 마지막)
+            if progress_callback and (checked_count % 10 == 0 or checked_count == total_files):
+                progress_callback(f"검색 중... ({checked_count}/{total_files} 파일 검사 완료)")
+            
             try:
                 result = future.result(timeout=30)  # 타임아웃 30초
                 if result:
                     # 첫 번째 매칭 발견 시 나머지 작업 취소
                     for f in future_to_pdf:
                         f.cancel()
+                    if progress_callback:
+                        progress_callback(f"✓ 매칭 발견! ({checked_count}/{total_files} 파일 검사 완료)")
                     return result
-            except Exception:
+            except Exception as e:
+                if progress_callback and checked_count % 50 == 0:  # 50개마다 오류 로그
+                    progress_callback(f"일부 파일 검색 오류 (계속 진행 중...)")
                 continue
     
+    if progress_callback:
+        progress_callback(f"검색 완료: {total_files}개 파일 모두 검사했으나 매칭 없음")
     return None
 
 
-def find_pdf_by_tracking_or_order(search_value: str, base_dirs: Optional[List[str]] = None) -> Optional[Dict]:
+def find_pdf_by_tracking_or_order(
+    search_value: str,
+    base_dirs: Optional[List[str]] = None,
+    use_multicore: bool = True,
+    cancel_flag: Optional[object] = None,
+    progress_callback: Optional[callable] = None
+) -> Optional[Dict]:
     """
     송장번호 또는 주문번호로 PDF 파일 찾기
     
     Args:
         search_value: 검색할 송장번호 또는 주문번호
         base_dirs: 검색할 기본 폴더 리스트 (None이면 labels, orders 사용)
+        use_multicore: 멀티코어 사용 여부
+        cancel_flag: 취소 플래그 객체
+        progress_callback: 진행 상황 콜백 함수
     
     Returns:
         매칭 정보 또는 None
@@ -289,5 +411,11 @@ def find_pdf_by_tracking_or_order(search_value: str, base_dirs: Optional[List[st
     
     search_paths = [Path(d) for d in base_dirs]
     
-    return search_pdf_files(search_value, search_paths)
+    return search_pdf_files(
+        search_value,
+        search_paths,
+        use_multicore=use_multicore,
+        cancel_flag=cancel_flag,
+        progress_callback=progress_callback
+    )
 

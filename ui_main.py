@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QGridLayout, QListWidget, QListWidgetItem,
     QRadioButton, QButtonGroup, QComboBox, QTabWidget
 )
-from PySide6.QtCore import Qt, Slot, QTimer, QPropertyAnimation, QEasingCurve
+from PySide6.QtCore import Qt, Slot, QTimer, QPropertyAnimation, QEasingCurve, Signal
 from PySide6.QtGui import QFont, QColor, QPalette, QIcon
 import pandas as pd
 
@@ -184,11 +184,14 @@ from printer_manager import (
     print_pdf_with_printer, check_printer_exists
 )
 from pdf_search import find_pdf_by_tracking_or_order
-from reprint_pdf_extractor import extract_pages_from_pdf
+from reprint_pdf_extractor import extract_pages_from_pdf, extract_reprint_page_to_temp
 
 
 class MainWindow(QMainWindow):
     """메인 윈도우"""
+    
+    # 재출력 검색 완료 시그널
+    reprint_search_completed = Signal(object, bool)  # (search_result, cancelled)
     
     def __init__(self):
         super().__init__()
@@ -211,6 +214,9 @@ class MainWindow(QMainWindow):
         # UI 초기화
         self._init_ui()
         self._connect_signals()
+        
+        # 재출력 검색 완료 시그널 연결
+        self.reprint_search_completed.connect(self._on_reprint_search_completed)
         
         # 프린터 설정 로드 및 UI 반영
         self._load_printer_settings_to_ui()
@@ -312,10 +318,19 @@ class MainWindow(QMainWindow):
         
         # 송장번호/주문번호 입력
         input_layout.addWidget(QLabel("송장번호 또는 주문번호:"))
+        input_row = QHBoxLayout()
         self.reprint_input = QLineEdit()
-        self.reprint_input.setPlaceholderText("송장번호 또는 주문번호 입력")
-        self.reprint_input.returnPressed.connect(self._on_reprint_execute)  # Enter 키 지원
-        input_layout.addWidget(self.reprint_input)
+        self.reprint_input.setPlaceholderText("송장번호 또는 주문번호 입력 (하이픈 포함 가능)")
+        self.reprint_input.returnPressed.connect(self._on_reprint_search)  # Enter 키로 검색 시작
+        input_row.addWidget(self.reprint_input)
+        
+        # 멀티코어 사용 체크박스
+        self.reprint_multicore_check = QCheckBox("멀티코어 사용")
+        self.reprint_multicore_check.setChecked(True)  # 기본 체크
+        self.reprint_multicore_check.setToolTip("체크 시 CPU 코어의 70%를 사용하여 빠른 검색")
+        input_row.addWidget(self.reprint_multicore_check)
+        
+        input_layout.addLayout(input_row)
         
         layout.addWidget(input_group)
         
@@ -369,20 +384,46 @@ class MainWindow(QMainWindow):
         
         layout.addWidget(options_group)
         
+        # 검색 및 재출력 버튼 영역
+        button_group = QGroupBox("작업")
+        button_layout = QHBoxLayout(button_group)
+        
+        # 검색 버튼
+        self.reprint_search_btn = QPushButton("🔍 검색")
+        self.reprint_search_btn.setMinimumHeight(40)
+        self.reprint_search_btn.setFont(QFont("Arial", 12, QFont.Bold))
+        self.reprint_search_btn.clicked.connect(self._on_reprint_search)
+        button_layout.addWidget(self.reprint_search_btn)
+        
+        # 중단 버튼
+        self.reprint_cancel_btn = QPushButton("⏹ 중단")
+        self.reprint_cancel_btn.setMinimumHeight(40)
+        self.reprint_cancel_btn.setFont(QFont("Arial", 12, QFont.Bold))
+        self.reprint_cancel_btn.setEnabled(False)
+        self.reprint_cancel_btn.clicked.connect(self._on_reprint_cancel)
+        button_layout.addWidget(self.reprint_cancel_btn)
+        
         # 재출력 버튼
-        reprint_btn = QPushButton("재출력")
-        reprint_btn.setMinimumHeight(40)
-        reprint_btn.setFont(QFont("Arial", 12, QFont.Bold))
-        reprint_btn.clicked.connect(self._on_reprint_execute)
-        layout.addWidget(reprint_btn)
+        self.reprint_execute_btn = QPushButton("📄 재출력")
+        self.reprint_execute_btn.setMinimumHeight(40)
+        self.reprint_execute_btn.setFont(QFont("Arial", 12, QFont.Bold))
+        self.reprint_execute_btn.setEnabled(False)  # 초기 비활성화
+        self.reprint_execute_btn.clicked.connect(self._on_reprint_execute)
+        button_layout.addWidget(self.reprint_execute_btn)
+        
+        layout.addWidget(button_group)
+        
+        # 검색 결과 저장
+        self._reprint_search_result = None
+        self._reprint_search_cancelled = False
         
         layout.addStretch()
         
         return tab
     
     @Slot()
-    def _on_reprint_execute(self):
-        """재출력 실행 (멀티코어 PDF 검색)"""
+    def _on_reprint_search(self):
+        """재출력 검색 실행"""
         input_value = self.reprint_input.text().strip()
         
         if not input_value:
@@ -401,9 +442,6 @@ class MainWindow(QMainWindow):
         label_folder = self.reprint_label_folder_edit.text().strip() if print_label else None
         order_folder = self.reprint_order_folder_edit.text().strip() if print_order else None
         
-        # 멀티코어 PDF 검색 시작
-        self._add_log(f"[REPRINT-MANUAL] PDF 검색 시작: {input_value} (멀티코어 검색)")
-        
         # 검색할 폴더 리스트 구성
         search_folders = []
         if print_label and label_folder:
@@ -415,61 +453,152 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "경고", "검색할 폴더를 선택해주세요.")
             return
         
-        # PDF 파일 전체 검색 (멀티코어 활용)
-        search_result = find_pdf_by_tracking_or_order(input_value, search_folders)
+        # UI 상태 변경
+        self.reprint_search_btn.setEnabled(False)
+        self.reprint_cancel_btn.setEnabled(True)
+        self.reprint_execute_btn.setEnabled(False)
+        self._reprint_search_cancelled = False
         
-        tracking_no = None
-        found_pdf_path = None
+        # 취소 플래그 객체 생성
+        class CancelFlag:
+            def __init__(self):
+                self.cancelled = False
+        
+        cancel_flag = CancelFlag()
+        self._reprint_cancel_flag = cancel_flag
+        
+        # 멀티코어 사용 여부 확인
+        use_multicore = self.reprint_multicore_check.isChecked()
+        
+        # 멀티코어 PDF 검색 시작
+        search_mode = "멀티코어" if use_multicore else "단일코어"
+        self._add_log(f"[REPRINT-SEARCH] PDF 검색 시작: {input_value} ({search_mode} 검색)")
+        
+        # 검색을 별도 스레드에서 실행 (UI 블로킹 방지)
+        import threading
+        
+        def search_thread():
+            try:
+                # 진행 상황 콜백 함수
+                def progress_callback(message: str):
+                    # 메인 스레드에서 안전하게 로그 추가
+                    from PySide6.QtCore import QTimer
+                    QTimer.singleShot(0, lambda: self._add_log(f"[REPRINT-SEARCH] {message}"))
+                
+                # PDF 파일 전체 검색
+                search_result = find_pdf_by_tracking_or_order(
+                    input_value,
+                    search_folders,
+                    use_multicore=use_multicore,
+                    cancel_flag=cancel_flag,
+                    progress_callback=progress_callback
+                )
+                
+                # 시그널로 UI 업데이트 (메인 스레드에서 안전하게 처리)
+                self.reprint_search_completed.emit(search_result, cancel_flag.cancelled)
+                
+            except Exception as e:
+                self._add_log(f"[REPRINT-SEARCH] 검색 오류: {str(e)}")
+                self.reprint_search_btn.setEnabled(True)
+                self.reprint_cancel_btn.setEnabled(False)
+        
+        thread = threading.Thread(target=search_thread, daemon=True)
+        thread.start()
+    
+    @Slot()
+    def _on_reprint_cancel(self):
+        """재출력 검색 중단"""
+        if hasattr(self, '_reprint_cancel_flag'):
+            self._reprint_cancel_flag.cancelled = True
+            self._reprint_search_cancelled = True
+            self._add_log("[REPRINT-SEARCH] 검색 중단 요청")
+        
+        self.reprint_search_btn.setEnabled(True)
+        self.reprint_cancel_btn.setEnabled(False)
+        self.reprint_execute_btn.setEnabled(False)
+    
+    @Slot(object, bool)
+    def _on_reprint_search_completed(self, search_result, cancelled):
+        """재출력 검색 완료 처리 (시그널 핸들러)"""
+        if cancelled:
+            self._add_log("[REPRINT-SEARCH] 검색이 취소되었습니다.")
+            self.reprint_search_btn.setEnabled(True)
+            self.reprint_cancel_btn.setEnabled(False)
+            return
+        
+        input_value = self.reprint_input.text().strip()
         
         if search_result:
-            # 검색 성공
+            self._reprint_search_result = search_result
             found_pdf_path = search_result.get("pdf_path")
             result_type = search_result.get("type")
+            original_format = search_result.get("original", "")
             
             if result_type == "tracking":
                 tracking_no = search_result.get("tracking_no")
-                self._add_log(f"[REPRINT-MANUAL] PDF 검색 성공: 송장번호 {tracking_no} (파일: {Path(found_pdf_path).name})")
+                # 원본 형식이 있으면 표시
+                format_info = f" (원본 형식: {original_format})" if original_format else ""
+                self._add_log(f"[REPRINT-SEARCH] ✓ 송장번호 '{tracking_no}' 찾았습니다!{format_info}")
+                self._add_log(f"[REPRINT-SEARCH] 파일: {Path(found_pdf_path).name}")
+                self._add_log(f"[REPRINT-SEARCH] 경로: {found_pdf_path}")
             elif result_type == "order":
                 order_no = search_result.get("order_no")
-                self._add_log(f"[REPRINT-MANUAL] PDF 검색 성공: 주문번호 {order_no} (파일: {Path(found_pdf_path).name})")
-                
-                # 주문번호로 tracking_no 찾기 시도
-                if self.excel_loader.df is not None:
-                    tracking_no = self.excel_loader.find_tracking_by_order_no(order_no)
-                    if tracking_no:
-                        self._add_log(f"[REPRINT-MANUAL] 주문번호 {order_no} → 송장번호 {tracking_no}")
-                    else:
-                        # 엑셀에 없어도 PDF 파일명에서 추출 시도
-                        pdf_name = Path(found_pdf_path).stem
-                        # PDF 파일명이 송장번호일 수 있음
-                        tracking_no = pdf_name
+                format_info = f" (원본 형식: {original_format})" if original_format else ""
+                self._add_log(f"[REPRINT-SEARCH] ✓ 주문번호 '{order_no}' 찾았습니다!{format_info}")
+                self._add_log(f"[REPRINT-SEARCH] 파일: {Path(found_pdf_path).name}")
+                self._add_log(f"[REPRINT-SEARCH] 경로: {found_pdf_path}")
+            
+            # 재출력 버튼 활성화
+            self.reprint_execute_btn.setEnabled(True)
+            self._add_log("[REPRINT-SEARCH] ✅ 검색 완료! 재출력 버튼을 클릭하여 출력하세요.")
         else:
-            # PDF 검색 실패 시 엑셀에서 검색 시도
-            if self.excel_loader.df is not None:
-                tracking_no = self.excel_loader.find_tracking_by_order_no(input_value)
-                if tracking_no:
-                    self._add_log(f"[REPRINT-MANUAL] 엑셀에서 주문번호 검색 성공: {input_value} → {tracking_no}")
-                else:
-                    # 입력값을 tracking_no로 간주하고 파일 존재 확인
-                    label_path = Path("labels") / f"{input_value}.pdf"
-                    order_path = Path("orders") / f"{input_value}.pdf"
-                    
-                    if label_path.exists() or order_path.exists():
-                        tracking_no = input_value
-                        self._add_log(f"[REPRINT-MANUAL] 파일명으로 인식: {tracking_no}")
-        
-        # 검색 실패
-        if not tracking_no:
+            self._add_log(f"[REPRINT-SEARCH] 검색 실패: {input_value}를 찾을 수 없습니다.")
             QMessageBox.warning(
                 self,
-                "재출력 실패",
+                "검색 실패",
                 f"재출력 대상이 존재하지 않습니다.\n\n"
                 f"입력값: {input_value}\n\n"
                 f"확인 사항:\n"
                 f"- 송장번호/주문번호가 정확한지 확인\n"
-                f"- PDF 파일이 labels/ 또는 orders/ 폴더에 있는지 확인"
+                f"- PDF 파일이 선택한 폴더에 있는지 확인"
             )
+        
+        # UI 상태 복원
+        self.reprint_search_btn.setEnabled(True)
+        self.reprint_cancel_btn.setEnabled(False)
+    
+    @Slot()
+    def _on_reprint_execute(self):
+        """재출력 실행 (검색 결과 사용)"""
+        if not self._reprint_search_result:
+            QMessageBox.warning(self, "경고", "먼저 검색을 실행해주세요.")
             return
+        
+        search_result = self._reprint_search_result
+        
+        # 검색 결과에서 정보 추출
+        found_pdf_path = search_result.get("pdf_path")
+        result_type = search_result.get("type")
+        
+        tracking_no = None
+        
+        if result_type == "tracking":
+            tracking_no = search_result.get("tracking_no")
+            self._add_log(f"[REPRINT-MANUAL] 송장번호: {tracking_no} (파일: {Path(found_pdf_path).name})")
+        elif result_type == "order":
+            order_no = search_result.get("order_no")
+            self._add_log(f"[REPRINT-MANUAL] 주문번호: {order_no} (파일: {Path(found_pdf_path).name})")
+            
+            # 주문번호로 tracking_no 찾기 시도
+            if self.excel_loader.df is not None:
+                tracking_no = self.excel_loader.find_tracking_by_order_no(order_no)
+                if tracking_no:
+                    self._add_log(f"[REPRINT-MANUAL] 주문번호 {order_no} → 송장번호 {tracking_no}")
+                else:
+                    # 엑셀에 없어도 PDF 파일명에서 추출 시도
+                    pdf_name = Path(found_pdf_path).stem
+                    # PDF 파일명이 송장번호일 수 있음
+                    tracking_no = pdf_name
         
         # 프린터 설정 로드
         settings = load_printer_settings()
@@ -559,12 +688,16 @@ class MainWindow(QMainWindow):
                         order_path = Path(found_pdf_path)
             
             if order_path and order_path.exists():
-                # 2페이지 감지 및 추출
-                extract_result = extract_pages_from_pdf(order_path, tracking_no)
+                # 주문서는 크롭 없이 원본 전체 사용
+                temp_pdf_path = extract_reprint_page_to_temp(
+                    order_path,
+                    tracking_no,
+                    is_order_sheet=True,
+                    keep_temp_files=self.pdf_printer.keep_temp_files
+                )
                 
-                if extract_result:
-                    temp_pdf_path, page_count = extract_result
-                    self._add_log(f"[REPRINT-MANUAL] 주문서 {page_count}장 추출 완료: {tracking_no}")
+                if temp_pdf_path:
+                    self._add_log(f"[REPRINT-MANUAL] 주문서 추출 완료: {tracking_no} (크롭 없음, 원본 전체)")
                     
                     if a4_printer:
                         success = print_pdf_with_printer(str(temp_pdf_path), a4_printer)
@@ -573,7 +706,28 @@ class MainWindow(QMainWindow):
                     
                     if success:
                         printer_display = a4_printer if a4_printer else "기본 프린터"
-                        self._add_log(f"[REPRINT-MANUAL] 주문서 출력 성공: {tracking_no} ({page_count}장) → {printer_display}")
+                        self._add_log(f"[REPRINT-MANUAL] 주문서 출력 성공: {tracking_no} → {printer_display}")
+                        success_count += 1
+                    else:
+                        self._add_log(f"[REPRINT-MANUAL] 주문서 출력 실패: {tracking_no}")
+                        fail_count += 1
+                    
+                    # 임시 파일 삭제 (keep_temp_files 설정 확인)
+                    if not self.pdf_printer.keep_temp_files and temp_pdf_path.exists():
+                        try:
+                            temp_pdf_path.unlink()
+                        except:
+                            pass
+                else:
+                    # 추출 실패 시 원본 파일 직접 출력
+                    if a4_printer:
+                        success = print_pdf_with_printer(str(order_path), a4_printer)
+                    else:
+                        success = print_pdf_with_printer(str(order_path), None)
+                    
+                    if success:
+                        printer_display = a4_printer if a4_printer else "기본 프린터"
+                        self._add_log(f"[REPRINT-MANUAL] 주문서 출력 성공: {tracking_no} (원본 파일) → {printer_display}")
                         success_count += 1
                     else:
                         self._add_log(f"[REPRINT-MANUAL] 주문서 출력 실패: {tracking_no}")

@@ -752,18 +752,18 @@ class PDFPrinter(QObject):
                         end_page = page_num + 1
                         self.print_success.emit(f"[주문서] ✓ 2장 송장 감지: 다음 페이지({page_num + 2})도 함께 출력")
             
-            # 페이지 추출
+            # 페이지 추출 (주문서는 크롭 없이 원본 전체 사용)
             optimized_doc = fitz.open()
             for page_idx in range(start_page, end_page + 1):
                 page = doc[page_idx]
                 original_rect = page.rect
-                clip_rect = self._detect_content_rect(page)
                 original_rotation = page.rotation
                 
+                # 주문서는 크롭 없이 전체 페이지 사용
                 dpi = 300
                 zoom = dpi / 72
                 mat = fitz.Matrix(zoom, zoom)
-                pix = page.get_pixmap(matrix=mat, clip=clip_rect, alpha=False)
+                pix = page.get_pixmap(matrix=mat, alpha=False)  # clip 파라미터 제거 (전체 페이지)
                 
                 if original_rotation in [90, 270]:
                     new_page = optimized_doc.new_page(width=original_rect.height, height=original_rect.width)
