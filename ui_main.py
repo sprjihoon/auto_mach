@@ -186,6 +186,7 @@ from printer_manager import (
 )
 from pdf_search import find_pdf_by_tracking_or_order
 from reprint_pdf_extractor import extract_pages_from_pdf, extract_reprint_page_to_temp
+from bin_manager import BinManager
 
 
 class MainWindow(QMainWindow):
@@ -207,6 +208,9 @@ class MainWindow(QMainWindow):
             self.ezauto,
             self.pdf_printer
         )
+        
+        # BIN 관리자 초기화
+        self.bin_manager = BinManager()
         
         # 우선순위 규칙 초기화 (기본값: 단품 우선)
         from priority_engine import get_default_rules
@@ -1147,13 +1151,34 @@ class MainWindow(QMainWindow):
         left_group = QGroupBox("현재 작업 중인 송장")
         left_layout = QVBoxLayout(left_group)
         
-        # 현재 tracking_no 표시
+        # 현재 tracking_no 표시 + BIN 주소
         tracking_layout = QHBoxLayout()
         tracking_layout.addWidget(QLabel("송장번호:"))
         self.current_tracking_label = QLabel("-")
         self.current_tracking_label.setFont(QFont("Consolas", 14, QFont.Bold))
         self.current_tracking_label.setStyleSheet("color: #2196F3;")
         tracking_layout.addWidget(self.current_tracking_label)
+        
+        # BIN 주소 표시 패널
+        tracking_layout.addSpacing(20)
+        bin_label = QLabel("BIN:")
+        bin_label.setFont(QFont("", 12, QFont.Bold))
+        tracking_layout.addWidget(bin_label)
+        
+        self.current_bin_label = QLabel("BIN 미지정")
+        self.current_bin_label.setFont(QFont("Consolas", 18, QFont.Bold))
+        self.current_bin_label.setStyleSheet("""
+            QLabel {
+                color: #FFFFFF;
+                background-color: #9E9E9E;
+                padding: 8px 16px;
+                border-radius: 8px;
+                min-width: 100px;
+            }
+        """)
+        self.current_bin_label.setAlignment(Qt.AlignCenter)
+        tracking_layout.addWidget(self.current_bin_label)
+        
         tracking_layout.addStretch()
         
         # 남은 수량
@@ -1535,6 +1560,21 @@ class MainWindow(QMainWindow):
             self._add_log(f"엑셀 파일 로드 성공: {file_path}")
             self.status_file.setText(f"파일: {Path(file_path).name}")
             
+            # ====== BIN 자동 배정 (엑셀 로드 시) ======
+            # 1) BIN 전체 리셋
+            self.bin_manager.reset()
+            self._add_log("[BIN] BIN 정보 리셋 완료")
+            self._update_bin_display("BIN 미지정")
+            
+            # 2) SKU별 BIN 자동 배정
+            bin_count = self.bin_manager.assign_bins_from_dataframe(self.excel_loader.df)
+            if bin_count > 0:
+                self._add_log(f"[BIN] SKU별 BIN 자동 배정 완료: {bin_count}개 BIN 생성")
+            
+            # 3) 송장별 BIN 매핑 구축
+            self.bin_manager.build_order_bin_map(self.excel_loader.df)
+            self._add_log(f"[BIN] 송장별 BIN 매핑 완료")
+            
             # PDF 폴더 설정
             pdf_path = self.pdf_path_edit.text().strip()
             if pdf_path:
@@ -1649,6 +1689,9 @@ class MainWindow(QMainWindow):
             # 로케이션 컬럼 확인
             has_location = 'location' in pending.columns
             
+            # BIN 시스템 초기화 여부 확인
+            has_bin = self.bin_manager.is_initialized
+            
             # 제품별 집계 (UI와 동일하게 product_name + option_name으로 그룹화)
             product_data = []
             product_summary = {}
@@ -1665,6 +1708,9 @@ class MainWindow(QMainWindow):
                 if has_location and 'location' in row and pd.notna(row['location']):
                     location = str(row['location'])
                 
+                # BIN 주소 조회
+                bin_id = self.bin_manager.get_sku_bin(barcode) if has_bin else "BIN 미지정"
+                
                 key = f"{product_name}|{option_name}"
                 if key not in product_summary:
                     product_summary[key] = {
@@ -1672,7 +1718,8 @@ class MainWindow(QMainWindow):
                         'option_name': option_name,
                         'remaining': 0,
                         'location': location,
-                        'barcode': barcode
+                        'barcode': barcode,
+                        'bin_id': bin_id
                     }
                 product_summary[key]['remaining'] += remaining
             
@@ -1681,8 +1728,18 @@ class MainWindow(QMainWindow):
                 if item['remaining'] > 0:
                     product_data.append(item)
             
-            # 수량 내림차순 정렬
-            product_data.sort(key=lambda x: -x['remaining'])
+            # BIN 번호 오름차순 정렬 (BIN 배정 기준과 동일하게 수량 내림차순)
+            def get_bin_sort_key(item):
+                bin_id = item.get('bin_id', 'BIN 미지정')
+                if bin_id == 'BIN 미지정':
+                    return (999, -item['remaining'])
+                try:
+                    bin_num = int(bin_id.split('-')[1])
+                except:
+                    bin_num = 999
+                return (bin_num, -item['remaining'])
+            
+            product_data.sort(key=get_bin_sort_key)
             
             # PDF 생성
             doc = SimpleDocTemplate(file_path, pagesize=A4, 
@@ -1707,32 +1764,35 @@ class MainWindow(QMainWindow):
             elements.append(title)
             elements.append(Spacer(1, 10*mm))
             
-            # 테이블 헤더
+            # 테이블 헤더 (BIN 컬럼 추가 - 첫 번째 컬럼)
             if has_location:
-                headers = ['No', '수량', '로케이션', '제품명', '옵션명', '바코드']
-                col_widths = [10*mm, 15*mm, 25*mm, 55*mm, 40*mm, 35*mm]
+                headers = ['BIN', 'No', '수량', '로케이션', '제품명', '옵션명', '바코드']
+                col_widths = [18*mm, 10*mm, 15*mm, 22*mm, 50*mm, 35*mm, 30*mm]
             else:
-                headers = ['No', '수량', '제품명', '옵션명', '바코드']
-                col_widths = [10*mm, 15*mm, 70*mm, 50*mm, 35*mm]
+                headers = ['BIN', 'No', '수량', '제품명', '옵션명', '바코드']
+                col_widths = [18*mm, 10*mm, 15*mm, 60*mm, 45*mm, 32*mm]
             
             # 테이블 데이터
             table_data = [headers]
             for i, item in enumerate(product_data, 1):
+                bin_id = item.get('bin_id', 'BIN 미지정')
                 if has_location:
                     row = [
+                        bin_id,
                         str(i),
                         str(item['remaining']),
                         item['location'],
-                        item['product_name'][:30],
-                        item['option_name'][:20] if item['option_name'] != 'nan' else '',
+                        item['product_name'][:28],
+                        item['option_name'][:18] if item['option_name'] != 'nan' else '',
                         item['barcode']
                     ]
                 else:
                     row = [
+                        bin_id,
                         str(i),
                         str(item['remaining']),
-                        item['product_name'][:40],
-                        item['option_name'][:25] if item['option_name'] != 'nan' else '',
+                        item['product_name'][:35],
+                        item['option_name'][:22] if item['option_name'] != 'nan' else '',
                         item['barcode']
                     ]
                 table_data.append(row)
@@ -1746,13 +1806,17 @@ class MainWindow(QMainWindow):
                 ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2196F3')),
                 ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
                 ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
-                ('ALIGN', (0, 1), (1, -1), 'CENTER'),  # No, 수량 중앙
-                ('ALIGN', (2, 1), (-1, -1), 'LEFT'),
+                ('ALIGN', (0, 1), (2, -1), 'CENTER'),  # BIN, No, 수량 중앙
+                ('ALIGN', (3, 1), (-1, -1), 'LEFT'),
                 ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
                 ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
                 ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#F5F5F5')]),
                 ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
                 ('TOPPADDING', (0, 0), (-1, -1), 4),
+                # BIN 컬럼 강조
+                ('FONTNAME', (0, 1), (0, -1), font_name),
+                ('FONTSIZE', (0, 1), (0, -1), 10),
+                ('BACKGROUND', (0, 1), (0, -1), colors.HexColor('#E3F2FD')),
             ]))
             
             elements.append(table)
@@ -2386,10 +2450,15 @@ class MainWindow(QMainWindow):
         if not tracking_no:
             self.current_tracking_label.setText("-")
             self.remaining_label.setText("0")
+            self._update_bin_display("BIN 미지정")
             self.detail_table.setRowCount(0)
             return
         
         self.current_tracking_label.setText(tracking_no)
+        
+        # BIN 주소 표시 업데이트
+        bin_id = self.bin_manager.get_order_bin(tracking_no)
+        self._update_bin_display(bin_id)
         
         items = self.processor.get_current_tracking_items()
         if items.empty:
@@ -2792,6 +2861,49 @@ class MainWindow(QMainWindow):
         self.log_text.verticalScrollBar().setValue(
             self.log_text.verticalScrollBar().maximum()
         )
+    
+    def _update_bin_display(self, bin_id: str):
+        """BIN 주소 표시 업데이트"""
+        if not hasattr(self, 'current_bin_label') or self.current_bin_label is None:
+            return
+        
+        self.current_bin_label.setText(bin_id)
+        
+        # BIN 번호에 따른 색상 지정
+        if bin_id == "BIN 미지정":
+            # 회색 (미지정)
+            bg_color = "#9E9E9E"
+            text_color = "#FFFFFF"
+        else:
+            # BIN 번호 추출
+            try:
+                bin_num = int(bin_id.split('-')[1])
+            except:
+                bin_num = 0
+            
+            # BIN 번호에 따른 색상 (1~5: 파랑, 6~10: 초록, 11~15: 주황, 16~: 빨강)
+            if bin_num <= 5:
+                bg_color = "#2196F3"  # 파랑 (가장 많은 SKU)
+                text_color = "#FFFFFF"
+            elif bin_num <= 10:
+                bg_color = "#4CAF50"  # 초록
+                text_color = "#FFFFFF"
+            elif bin_num <= 15:
+                bg_color = "#FF9800"  # 주황
+                text_color = "#FFFFFF"
+            else:
+                bg_color = "#F44336"  # 빨강
+                text_color = "#FFFFFF"
+        
+        self.current_bin_label.setStyleSheet(f"""
+            QLabel {{
+                color: {text_color};
+                background-color: {bg_color};
+                padding: 8px 16px;
+                border-radius: 8px;
+                min-width: 100px;
+            }}
+        """)
     
     def closeEvent(self, event):
         """프로그램 종료 시"""
