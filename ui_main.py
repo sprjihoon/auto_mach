@@ -212,6 +212,9 @@ class MainWindow(QMainWindow):
         # BIN 관리자 초기화
         self.bin_manager = BinManager()
         
+        # 제외 송장 목록 초기화
+        self._excluded_tracking_numbers: set = set()
+        
         # 우선순위 규칙 초기화 (기본값: 단품 우선)
         from priority_engine import get_default_rules
         self.processor.set_priority_rules(get_default_rules())
@@ -969,7 +972,7 @@ class MainWindow(QMainWindow):
         return group
     
     def _create_priority_section(self) -> QWidget:
-        """우선순위 설정 섹션 (우선순위 설정 + 우선 송장 관리)"""
+        """우선순위 설정 섹션 (우선순위 설정 + 우선 송장 관리 + 제외 송장 관리)"""
         widget = QWidget()
         layout = QHBoxLayout(widget)
         layout.setSpacing(10)
@@ -982,6 +985,10 @@ class MainWindow(QMainWindow):
         # 우선 송장 추가 패널
         priority_tracking_group = self._create_priority_tracking_panel()
         layout.addWidget(priority_tracking_group, 1)
+        
+        # 제외 송장 관리 패널
+        exclude_tracking_group = self._create_exclude_tracking_panel()
+        layout.addWidget(exclude_tracking_group, 1)
         
         return widget
     
@@ -1141,6 +1148,51 @@ class MainWindow(QMainWindow):
         
         return group
     
+    def _create_exclude_tracking_panel(self) -> QGroupBox:
+        """제외 송장 관리 패널"""
+        group = QGroupBox("🚫 제외 송장 관리")
+        layout = QVBoxLayout(group)
+        layout.setSpacing(5)
+        layout.setContentsMargins(8, 15, 8, 8)
+        
+        # 입력 영역
+        input_layout = QHBoxLayout()
+        
+        self.exclude_tracking_input = QLineEdit()
+        self.exclude_tracking_input.setPlaceholderText("제외할 송장번호 입력 (여러 개: 줄바꿈 또는 쉼표 구분)")
+        self.exclude_tracking_input.returnPressed.connect(self._on_add_exclude_tracking)
+        input_layout.addWidget(self.exclude_tracking_input)
+        
+        add_btn = QPushButton("추가")
+        add_btn.setStyleSheet("background-color: #FF5722; color: white;")
+        add_btn.clicked.connect(self._on_add_exclude_tracking)
+        add_btn.setMaximumWidth(60)
+        input_layout.addWidget(add_btn)
+        
+        remove_btn = QPushButton("해제")
+        remove_btn.clicked.connect(self._on_remove_exclude_tracking)
+        remove_btn.setMaximumWidth(60)
+        input_layout.addWidget(remove_btn)
+        
+        layout.addLayout(input_layout)
+        
+        # 제외 송장 목록
+        list_label = QLabel("제외 송장 목록:")
+        layout.addWidget(list_label)
+        
+        self.exclude_tracking_list = QListWidget()
+        self.exclude_tracking_list.setMaximumHeight(100)
+        self.exclude_tracking_list.setSelectionMode(QListWidget.SingleSelection)
+        self.exclude_tracking_list.setStyleSheet("QListWidget { background-color: #FFEBEE; }")
+        layout.addWidget(self.exclude_tracking_list)
+        
+        # 설명 텍스트
+        help_label = QLabel("⚠️ 제외된 송장은 스캔해도 처리되지 않습니다")
+        help_label.setStyleSheet("font-size: 9px; color: #D32F2F;")
+        layout.addWidget(help_label)
+        
+        return group
+    
     def _create_tables_section(self) -> QWidget:
         """테이블 섹션"""
         widget = QWidget()
@@ -1159,26 +1211,33 @@ class MainWindow(QMainWindow):
         self.current_tracking_label.setStyleSheet("color: #2196F3;")
         tracking_layout.addWidget(self.current_tracking_label)
         
-        # BIN 주소 표시 패널
+        # BIN 주소 표시 패널 (여러 BIN 표시 가능)
         tracking_layout.addSpacing(20)
         bin_label = QLabel("BIN:")
         bin_label.setFont(QFont("", 12, QFont.Bold))
         tracking_layout.addWidget(bin_label)
         
+        # BIN 컨테이너 (여러 BIN 배지를 담는 레이아웃)
+        self.bin_container = QWidget()
+        self.bin_layout = QHBoxLayout(self.bin_container)
+        self.bin_layout.setContentsMargins(0, 0, 0, 0)
+        self.bin_layout.setSpacing(8)
+        
+        # 초기 BIN 미지정 레이블
         self.current_bin_label = QLabel("BIN 미지정")
-        self.current_bin_label.setFont(QFont("Consolas", 18, QFont.Bold))
+        self.current_bin_label.setFont(QFont("Consolas", 16, QFont.Bold))
         self.current_bin_label.setStyleSheet("""
             QLabel {
                 color: #FFFFFF;
                 background-color: #9E9E9E;
-                padding: 8px 16px;
-                border-radius: 8px;
-                min-width: 100px;
+                padding: 6px 12px;
+                border-radius: 6px;
             }
         """)
         self.current_bin_label.setAlignment(Qt.AlignCenter)
-        tracking_layout.addWidget(self.current_bin_label)
+        self.bin_layout.addWidget(self.current_bin_label)
         
+        tracking_layout.addWidget(self.bin_container)
         tracking_layout.addStretch()
         
         # 남은 수량
@@ -1190,11 +1249,11 @@ class MainWindow(QMainWindow):
         
         left_layout.addLayout(tracking_layout)
         
-        # 상세 테이블
+        # 상세 테이블 (BIN 컬럼 추가)
         self.detail_table = QTableWidget()
-        self.detail_table.setColumnCount(6)
+        self.detail_table.setColumnCount(7)
         self.detail_table.setHorizontalHeaderLabels([
-            "상품명", "옵션명", "바코드", "필요수량", "스캔수량", "남은수량"
+            "상품명", "옵션명", "바코드", "필요수량", "스캔수량", "남은수량", "BIN"
         ])
         self.detail_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.detail_table.setAlternatingRowColors(True)
@@ -1519,8 +1578,8 @@ class MainWindow(QMainWindow):
                 self._add_log(f"PDF 파일 설정: {file_path} (크롭된 버전 사용)")
             except Exception as e:
                 self._add_log(f"[오류] PDF 크롭 실패: {str(e)}. 원본 파일 사용.")
-                self.pdf_path_edit.setText(file_path)
-                self.pdf_printer.set_pdf_file(file_path)
+            self.pdf_path_edit.setText(file_path)
+            self.pdf_printer.set_pdf_file(file_path)
             
             # 자동 인덱싱
             self._add_log("PDF 파일 스캔 중...")
@@ -1564,16 +1623,30 @@ class MainWindow(QMainWindow):
             # 1) BIN 전체 리셋
             self.bin_manager.reset()
             self._add_log("[BIN] BIN 정보 리셋 완료")
-            self._update_bin_display("BIN 미지정")
+            self._update_bin_display(["BIN 미지정"])
+            
+            # 제외 송장 목록 초기화 (새 작업 세션)
+            self._excluded_tracking_numbers.clear()
+            self._update_exclude_tracking_list()
+            self._add_log("[제외] 제외 송장 목록 초기화됨")
             
             # 2) SKU별 BIN 자동 배정
             bin_count = self.bin_manager.assign_bins_from_dataframe(self.excel_loader.df)
             if bin_count > 0:
-                self._add_log(f"[BIN] SKU별 BIN 자동 배정 완료: {bin_count}개 BIN 생성")
+                self._add_log(f"<b style='color:#2196F3'>[BIN] SKU별 BIN 자동 배정 완료: {bin_count}개 BIN 생성</b>", html=True)
+                # BIN 배정 상세 로그
+                sku_bins = self.bin_manager.get_all_sku_bins()
+                for barcode, bin_id, _ in sku_bins[:10]:  # 처음 10개만 로그
+                    self._add_log(f"  → {bin_id}: {barcode}")
+                if len(sku_bins) > 10:
+                    self._add_log(f"  ... 외 {len(sku_bins) - 10}개")
+            else:
+                self._add_log("[BIN] SKU가 없어서 BIN 배정 건너뜀")
             
             # 3) 송장별 BIN 매핑 구축
             self.bin_manager.build_order_bin_map(self.excel_loader.df)
-            self._add_log(f"[BIN] 송장별 BIN 매핑 완료")
+            order_bin_count = len(self.bin_manager.get_order_bin_map())
+            self._add_log(f"[BIN] 송장별 BIN 매핑 완료: {order_bin_count}개 송장")
             
             # PDF 폴더 설정
             pdf_path = self.pdf_path_edit.text().strip()
@@ -2370,6 +2443,77 @@ class MainWindow(QMainWindow):
             item.setData(Qt.UserRole, tracking_no)  # tracking_no 저장
             self.priority_tracking_list.addItem(item)
     
+    # ===== 제외 송장 관리 =====
+    
+    def _on_add_exclude_tracking(self):
+        """제외 송장 추가"""
+        input_text = self.exclude_tracking_input.text().strip()
+        if not input_text:
+            return
+        
+        # 여러 개 입력 지원: 줄바꿈 또는 쉼표로 구분
+        tracking_nos = []
+        for line in input_text.replace(',', '\n').split('\n'):
+            tn = line.strip()
+            if tn:
+                tracking_nos.append(tn)
+        
+        if not tracking_nos:
+            return
+        
+        # 각 송장번호 추가
+        added_count = 0
+        
+        for tracking_no in tracking_nos:
+            # 이미 제외 목록에 있는지 확인
+            if tracking_no not in self._excluded_tracking_numbers:
+                self._excluded_tracking_numbers.add(tracking_no)
+                added_count += 1
+        
+        # 입력창 초기화
+        self.exclude_tracking_input.clear()
+        
+        # 목록 업데이트
+        self._update_exclude_tracking_list()
+        
+        if added_count > 0:
+            self._add_log(f"🚫 제외 송장 {added_count}개 추가됨")
+    
+    def _on_remove_exclude_tracking(self):
+        """제외 송장 해제"""
+        selected_items = self.exclude_tracking_list.selectedItems()
+        if not selected_items:
+            QMessageBox.information(self, "알림", "해제할 송장을 선택하세요.")
+            return
+        
+        removed_count = 0
+        for item in selected_items:
+            tracking_no = item.data(Qt.UserRole)
+            if tracking_no in self._excluded_tracking_numbers:
+                self._excluded_tracking_numbers.remove(tracking_no)
+                removed_count += 1
+        
+        if removed_count > 0:
+            self._add_log(f"🚫 제외 송장 {removed_count}개 해제됨")
+            self._update_exclude_tracking_list()
+    
+    def _update_exclude_tracking_list(self):
+        """제외 송장 목록 UI 업데이트"""
+        if not hasattr(self, 'exclude_tracking_list'):
+            return
+        
+        self.exclude_tracking_list.clear()
+        
+        # 목록에 추가 (정렬)
+        for tracking_no in sorted(self._excluded_tracking_numbers):
+            item = QListWidgetItem(f"🚫 {tracking_no}")
+            item.setData(Qt.UserRole, tracking_no)
+            self.exclude_tracking_list.addItem(item)
+    
+    def is_tracking_excluded(self, tracking_no: str) -> bool:
+        """송장번호가 제외 목록에 있는지 확인"""
+        return tracking_no in self._excluded_tracking_numbers
+    
     @Slot()
     def _on_manual_scan(self):
         """수동 바코드 스캔"""
@@ -2386,6 +2530,29 @@ class MainWindow(QMainWindow):
         if self.excel_loader.df is None:
             self._add_log("[경고] 엑셀 파일을 먼저 로드하세요")
             return
+        
+        # 현재 작업 중인 송장이 제외 목록에 있는지 확인
+        current_tracking = self.processor.current_tracking_no
+        if current_tracking and self.is_tracking_excluded(current_tracking):
+            self._add_log(f"🚫 [제외] 송장 {current_tracking}은(는) 제외 목록에 있어 처리되지 않습니다")
+            return
+        
+        # 바코드로 찾을 수 있는 송장들 중 제외 목록 체크
+        candidates = self.excel_loader.find_by_barcode(barcode)
+        if not candidates.empty:
+            # 모든 후보 송장이 제외 목록에 있는지 확인
+            all_excluded = True
+            excluded_tracking = None
+            for _, row in candidates.iterrows():
+                tracking_no = str(row['tracking_no'])
+                if not self.is_tracking_excluded(tracking_no):
+                    all_excluded = False
+                    break
+                excluded_tracking = tracking_no
+            
+            if all_excluded and excluded_tracking:
+                self._add_log(f"🚫 [제외] 바코드 {barcode}의 송장({excluded_tracking})이 제외 목록에 있습니다")
+                return
         
         self.processor.process_scan(barcode)
     
@@ -2450,15 +2617,23 @@ class MainWindow(QMainWindow):
         if not tracking_no:
             self.current_tracking_label.setText("-")
             self.remaining_label.setText("0")
-            self._update_bin_display("BIN 미지정")
+            self._update_bin_display(["BIN 미지정"])
             self.detail_table.setRowCount(0)
             return
         
         self.current_tracking_label.setText(tracking_no)
         
-        # BIN 주소 표시 업데이트
-        bin_id = self.bin_manager.get_order_bin(tracking_no)
-        self._update_bin_display(bin_id)
+        # 현재 송장의 모든 SKU에 대한 BIN 주소 수집
+        items = self.processor.get_current_tracking_items()
+        if not items.empty:
+            bin_ids = []
+            for _, item in items.iterrows():
+                barcode = str(item['barcode']).strip()
+                bin_id = self.bin_manager.get_sku_bin(barcode)
+                bin_ids.append(bin_id)
+            self._update_bin_display(bin_ids)
+        else:
+            self._update_bin_display(["BIN 미지정"])
         
         items = self.processor.get_current_tracking_items()
         if items.empty:
@@ -2474,6 +2649,8 @@ class MainWindow(QMainWindow):
         
         for row, (_, item) in enumerate(items.iterrows()):
             item_remaining = max(0, item['qty'] - item['scanned_qty'])
+            barcode = str(item['barcode']).strip()
+            bin_id = self.bin_manager.get_sku_bin(barcode)
             
             self.detail_table.setItem(row, 0, QTableWidgetItem(str(item['product_name'])))
             self.detail_table.setItem(row, 1, QTableWidgetItem(str(item['option_name'])))
@@ -2482,9 +2659,18 @@ class MainWindow(QMainWindow):
             self.detail_table.setItem(row, 4, QTableWidgetItem(str(item['scanned_qty'])))
             self.detail_table.setItem(row, 5, QTableWidgetItem(str(item_remaining)))
             
+            # BIN 컬럼 추가
+            bin_item = QTableWidgetItem(bin_id)
+            bin_item.setTextAlignment(Qt.AlignCenter)
+            # BIN 번호에 따른 배경색
+            bg_color, _ = self._get_bin_color(bin_id)
+            bin_item.setBackground(QColor(bg_color))
+            bin_item.setForeground(QColor("#FFFFFF"))
+            self.detail_table.setItem(row, 6, bin_item)
+            
             # 완료된 항목은 녹색으로 표시
             if item_remaining == 0:
-                for col in range(6):
+                for col in range(6):  # BIN 컬럼 제외
                     self.detail_table.item(row, col).setBackground(QColor("#E8F5E9"))
     
     def _update_summary_table(self):
@@ -2862,48 +3048,86 @@ class MainWindow(QMainWindow):
             self.log_text.verticalScrollBar().maximum()
         )
     
-    def _update_bin_display(self, bin_id: str):
-        """BIN 주소 표시 업데이트"""
-        if not hasattr(self, 'current_bin_label') or self.current_bin_label is None:
+    def _update_bin_display(self, bin_ids: list = None):
+        """
+        BIN 주소 표시 업데이트 (여러 BIN 지원)
+        
+        Args:
+            bin_ids: BIN ID 리스트 또는 단일 문자열
+        """
+        if not hasattr(self, 'bin_layout') or self.bin_layout is None:
             return
         
-        self.current_bin_label.setText(bin_id)
+        # 기존 BIN 레이블 모두 제거
+        while self.bin_layout.count():
+            item = self.bin_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
         
-        # BIN 번호에 따른 색상 지정
-        if bin_id == "BIN 미지정":
-            # 회색 (미지정)
-            bg_color = "#9E9E9E"
-            text_color = "#FFFFFF"
-        else:
-            # BIN 번호 추출
+        # bin_ids가 문자열이면 리스트로 변환
+        if bin_ids is None:
+            bin_ids = ["BIN 미지정"]
+        elif isinstance(bin_ids, str):
+            bin_ids = [bin_ids]
+        
+        # 중복 제거 및 정렬
+        unique_bins = []
+        seen = set()
+        for bin_id in bin_ids:
+            if bin_id not in seen:
+                seen.add(bin_id)
+                unique_bins.append(bin_id)
+        
+        # BIN 번호 기준 정렬
+        def get_bin_num(bin_id):
+            if bin_id == "BIN 미지정":
+                return 999
             try:
-                bin_num = int(bin_id.split('-')[1])
+                return int(bin_id.split('-')[1])
             except:
-                bin_num = 0
-            
-            # BIN 번호에 따른 색상 (1~5: 파랑, 6~10: 초록, 11~15: 주황, 16~: 빨강)
-            if bin_num <= 5:
-                bg_color = "#2196F3"  # 파랑 (가장 많은 SKU)
-                text_color = "#FFFFFF"
-            elif bin_num <= 10:
-                bg_color = "#4CAF50"  # 초록
-                text_color = "#FFFFFF"
-            elif bin_num <= 15:
-                bg_color = "#FF9800"  # 주황
-                text_color = "#FFFFFF"
-            else:
-                bg_color = "#F44336"  # 빨강
-                text_color = "#FFFFFF"
+                return 999
         
-        self.current_bin_label.setStyleSheet(f"""
-            QLabel {{
-                color: {text_color};
-                background-color: {bg_color};
-                padding: 8px 16px;
-                border-radius: 8px;
-                min-width: 100px;
-            }}
-        """)
+        unique_bins.sort(key=get_bin_num)
+        
+        # 각 BIN에 대한 레이블 생성
+        for bin_id in unique_bins:
+            label = QLabel(bin_id)
+            label.setFont(QFont("Consolas", 16, QFont.Bold))
+            label.setAlignment(Qt.AlignCenter)
+            
+            # BIN 번호에 따른 색상 지정
+            bg_color, text_color = self._get_bin_color(bin_id)
+            
+            label.setStyleSheet(f"""
+                QLabel {{
+                    color: {text_color};
+                    background-color: {bg_color};
+                    padding: 6px 12px;
+                    border-radius: 6px;
+                }}
+            """)
+            
+            self.bin_layout.addWidget(label)
+    
+    def _get_bin_color(self, bin_id: str):
+        """BIN ID에 따른 색상 반환"""
+        if bin_id == "BIN 미지정":
+            return "#9E9E9E", "#FFFFFF"
+        
+        try:
+            bin_num = int(bin_id.split('-')[1])
+        except:
+            return "#9E9E9E", "#FFFFFF"
+        
+        # BIN 번호에 따른 색상 (1~5: 파랑, 6~10: 초록, 11~15: 주황, 16~: 빨강)
+        if bin_num <= 5:
+            return "#2196F3", "#FFFFFF"  # 파랑 (가장 많은 SKU)
+        elif bin_num <= 10:
+            return "#4CAF50", "#FFFFFF"  # 초록
+        elif bin_num <= 15:
+            return "#FF9800", "#FFFFFF"  # 주황
+        else:
+            return "#F44336", "#FFFFFF"  # 빨강
     
     def closeEvent(self, event):
         """프로그램 종료 시"""
