@@ -686,6 +686,14 @@ class MainWindow(QMainWindow):
                     # PDF 파일명이 송장번호일 수 있음
                     tracking_no = pdf_name
         
+        # 출력 옵션 확인
+        print_label = self.reprint_label_check.isChecked()
+        print_order = self.reprint_order_check.isChecked()
+        
+        if not print_label and not print_order:
+            QMessageBox.warning(self, "경고", "출력할 항목을 하나 이상 선택해주세요.")
+            return
+        
         # 프린터 설정 로드
         settings = load_printer_settings()
         label_printer = settings.get("label_printer")
@@ -823,6 +831,7 @@ class MainWindow(QMainWindow):
                 fail_count += 1
         
         # 최종 로그
+        input_value = self.reprint_input.text().strip()
         self._add_log(
             f"[REPRINT-MANUAL] 완료 - "
             f"input={input_value}, "
