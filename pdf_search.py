@@ -158,8 +158,7 @@ def _search_single_pdf(
                             # 줄바꿈 제거하여 패턴 매칭
                             normalized_text = _normalize_text_for_pattern(text)
                             
-                            # 정확한 패턴 매칭
-                            found = False
+                            # 정확한 패턴 매칭 시도
                             for pattern in patterns:
                                 matches = re.findall(pattern, normalized_text)
                                 for match in matches:
@@ -175,17 +174,16 @@ def _search_single_pdf(
                                             "page": page_num
                                         }
                             
-                            # 패턴 매칭 실패해도 텍스트에서 직접 찾았으면 반환
-                            if not found:
-                                result_type = "order" if len(search_clean) >= 14 else "tracking"
-                                return {
-                                    "pdf_path": str(pdf_path),
-                                    "tracking_no": search_clean if result_type == "tracking" else None,
-                                    "order_no": search_clean if result_type == "order" else None,
-                                    "original": search_clean,
-                                    "type": result_type,
-                                    "page": page_num
-                                }
+                            # 패턴 매칭 실패해도 텍스트에서 직접 찾았으면 반환 (fallback)
+                            result_type = "order" if len(search_clean) >= 14 else "tracking"
+                            return {
+                                "pdf_path": str(pdf_path),
+                                "tracking_no": search_clean if result_type == "tracking" else None,
+                                "order_no": search_clean if result_type == "order" else None,
+                                "original": search_clean,
+                                "type": result_type,
+                                "page": page_num
+                            }
         except Exception:
             pass
         
@@ -202,8 +200,7 @@ def _search_single_pdf(
                         # 줄바꿈 제거하여 패턴 매칭
                         normalized_text = _normalize_text_for_pattern(text)
                         
-                        # 정확한 패턴 매칭
-                        found = False
+                        # 정확한 패턴 매칭 시도
                         for pattern in patterns:
                             matches = re.findall(pattern, normalized_text)
                             for match in matches:
@@ -220,18 +217,17 @@ def _search_single_pdf(
                                         "page": page_num
                                     }
                         
-                        # 패턴 매칭 실패해도 텍스트에서 직접 찾았으면 반환
-                        if not found:
-                            doc.close()
-                            result_type = "order" if len(search_clean) >= 14 else "tracking"
-                            return {
-                                "pdf_path": str(pdf_path),
-                                "tracking_no": search_clean if result_type == "tracking" else None,
-                                "order_no": search_clean if result_type == "order" else None,
-                                "original": search_clean,
-                                "type": result_type,
-                                "page": page_num
-                            }
+                        # 패턴 매칭 실패해도 텍스트에서 직접 찾았으면 반환 (fallback)
+                        doc.close()
+                        result_type = "order" if len(search_clean) >= 14 else "tracking"
+                        return {
+                            "pdf_path": str(pdf_path),
+                            "tracking_no": search_clean if result_type == "tracking" else None,
+                            "order_no": search_clean if result_type == "order" else None,
+                            "original": search_clean,
+                            "type": result_type,
+                            "page": page_num
+                        }
                 
                 # 특수 패턴 (등기번호, 송장번호, 주문번호 라벨)
                 for text in texts:

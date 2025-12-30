@@ -75,7 +75,7 @@ class OrderProcessor(QObject):
     def current_tracking_no(self) -> Optional[str]:
         return self._current_tracking_no
     
-    def process_scan(self, barcode: str) -> ScanEvent:
+    def process_scan(self, barcode: str) -> Optional[ScanEvent]:
         """
         바코드 스캔 처리 메인 로직
         
@@ -95,7 +95,14 @@ class OrderProcessor(QObject):
         # 같은 바코드 0.5초 내 재스캔 방지 (스캐너 더블 스캔 방지용)
         if barcode == self._last_barcode and (current_time - self._last_scan_time) < 0.5:
             self.log_message.emit(f"[무시] 더블 스캔 방지: {barcode}")
-            return None
+            # None 대신 일관된 ScanEvent 반환
+            return ScanEvent(
+                timestamp=timestamp,
+                barcode=barcode,
+                tracking_no=None,
+                result=ScanResult.ERROR,
+                message=f"더블 스캔 무시: {barcode}"
+            )
         
         self._last_barcode = barcode
         self._last_scan_time = current_time

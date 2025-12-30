@@ -59,13 +59,29 @@ class ScannerListener(QObject):
             return
         
         try:
-            keyboard.unhook_all()
+            # unhook_all은 다른 모듈의 훅도 제거할 수 있으므로 주의 필요
+            # keyboard 모듈이 초기화되지 않았을 경우 예외 발생 가능
+            try:
+                keyboard.unhook_all()
+            except AttributeError:
+                # keyboard 모듈이 이미 정리된 경우 무시
+                pass
+            except Exception:
+                # 기타 예외도 무시 (프로그램 종료 시 발생 가능)
+                pass
+            
             self._is_running = False
-            self._buffer = ""
+            with self._lock:
+                self._buffer = ""
             self.status_changed.emit("스캐너 리스닝 중지됨")
             
         except Exception as e:
-            self.status_changed.emit(f"스캐너 중지 오류: {str(e)}")
+            self._is_running = False
+            try:
+                self.status_changed.emit(f"스캐너 중지 오류: {str(e)}")
+            except RuntimeError:
+                # Qt 객체가 이미 삭제된 경우 (프로그램 종료 시)
+                pass
     
     def _on_key_press(self, event: keyboard.KeyboardEvent):
         """키 입력 이벤트 핸들러 (스캐너 입력 속도 필터링)"""
